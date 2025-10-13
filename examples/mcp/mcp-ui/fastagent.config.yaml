@@ -1,0 +1,65 @@
+# FastAgent MCP-UI Example Configuration
+#
+# This configuration demonstrates how to set up an agent with MCP-UI support.
+# The mock UI server provides example tools that return interactive visualizations.
+
+# Agent definition
+agents:
+  ui-demo:
+    model: claude-sonnet-4-5-20250929
+    instruction: |
+      You are a helpful assistant that works with visualization tools.
+      When users ask for charts, dashboards, or visualizations, use the available tools.
+      After creating visualizations, explain what they show and any insights you notice.
+
+    # MCP servers that provide UI-capable tools
+    servers:
+      - mock-ui-server
+
+# MCP Server configurations
+servers:
+  - name: mock-ui-server
+    # Run the mock UI server from this directory
+    command: uv
+    args:
+      - run
+      - mock_ui_server.py
+    env:
+      # Optional environment variables for the server
+      LOG_LEVEL: info
+
+# MCP-UI Configuration
+# Control how UI resources are handled
+mcp_ui_mode: auto # Options: "auto", "enabled", "disabled"
+
+# Directory where MCP-UI HTML files are saved
+# Can be relative (to CWD) or absolute path
+mcp_ui_output_dir: ".fast-agent/ui"
+
+# UI Mode Details:
+#
+# "auto" (recommended):
+#   - Extracts UI resources from tool results
+#   - Saves HTML files to mcp_ui_output_dir
+#   - Displays clickable links in console
+#   - Automatically opens UI in default browser
+#
+# "enabled":
+#   - Extracts UI resources from tool results
+#   - Saves HTML files to mcp_ui_output_dir
+#   - Displays clickable links in console
+#   - Does NOT auto-open browser (manual click required)
+#
+# "disabled":
+#   - UI resources are not processed
+#   - No HTML files generated
+#   - No links displayed
+#   - Use when UI is not needed or causes issues
+
+# Additional settings
+display:
+  show_tool_results: true
+  show_thinking: true
+# Model settings (if needed)
+# provider_keys:
+#   anthropic: ${ANTHROPIC_API_KEY}
