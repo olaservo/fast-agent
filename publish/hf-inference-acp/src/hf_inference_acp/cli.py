@@ -500,7 +500,7 @@ def run_acp(
         help="Enable a local shell runtime and expose the execute tool (bash or pwsh).",
     ),
     instance_scope: serve.InstanceScope = typer.Option(
-        serve.InstanceScope.SHARED,
+        serve.InstanceScope.CONNECTION,
         "--instance-scope",
         help="Control how ACP clients receive isolated agent instances (shared, connection, request)",
     ),

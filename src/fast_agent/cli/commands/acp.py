@@ -141,7 +141,7 @@ def run_acp(
     ),
     shell: bool = CommonAgentOptions.shell(),
     instance_scope: serve.InstanceScope = typer.Option(
-        serve.InstanceScope.SHARED,
+        serve.InstanceScope.CONNECTION,
         "--instance-scope",
         help="Control how ACP clients receive isolated agent instances (shared, connection, request)",
     ),
