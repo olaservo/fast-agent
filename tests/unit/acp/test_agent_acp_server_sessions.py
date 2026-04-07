@@ -346,71 +346,6 @@ async def test_list_sessions_uses_request_cwd_for_session_manager(
         (None, None, True),
     ]
 
-
-@pytest.mark.asyncio
-async def test_list_sessions_prefers_workspace_duplicate_session_across_stores(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    server = _build_server(_build_instance(["main"]))
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    now = datetime.now()
-
-    workspace_session = SessionInfo(
-        name="s-1",
-        created_at=now,
-        last_activity=datetime(2024, 1, 1, 10, 0, 0),
-        metadata={"cwd": str(workspace.resolve()), "title": "workspace"},
-    )
-    app_session = SessionInfo(
-        name="s-1",
-        created_at=now,
-        last_activity=datetime(2024, 1, 1, 11, 0, 0),
-        metadata={"title": "app"},
-    )
-
-    class _WorkspaceManager:
-        workspace_dir = workspace
-        base_dir = workspace / ".fast-agent" / "sessions"
-
-        def list_sessions(self) -> list[SessionInfo]:
-            return [workspace_session]
-
-    class _AppManager:
-        workspace_dir = tmp_path / "app-root"
-        base_dir = workspace_dir / ".fast-agent" / "sessions"
-
-        def list_sessions(self) -> list[SessionInfo]:
-            return [app_session]
-
-    workspace_manager = _WorkspaceManager()
-    app_manager = _AppManager()
-
-    def fake_get_session_manager(
-        *,
-        cwd: Any = None,
-        environment_override: Any = None,
-        respect_env_override: bool = True,
-    ) -> Any:
-        del environment_override, respect_env_override
-        if cwd is not None:
-            return workspace_manager
-        return app_manager
-
-    monkeypatch.setattr(
-        "fast_agent.acp.server.agent_acp_server.get_session_manager",
-        fake_get_session_manager,
-    )
-
-    response = await server.list_sessions(cwd=str(workspace))
-
-    assert len(response.sessions) == 1
-    assert response.sessions[0].session_id == "s-1"
-    assert response.sessions[0].title == "workspace"
-    assert response.sessions[0].updated_at == workspace_session.last_activity.isoformat()
-
-
 @pytest.mark.asyncio
 async def test_load_session_prefers_workspace_duplicate_session_across_stores(
     monkeypatch: pytest.MonkeyPatch,
@@ -503,6 +438,71 @@ async def test_load_session_prefers_workspace_duplicate_session_across_stores(
 
     assert response is not None
     assert resume_managers == ["workspace"]
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_prefers_workspace_duplicate_session_across_stores(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    server = _build_server(_build_instance(["main"]))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    now = datetime.now()
+
+    workspace_session = SessionInfo(
+        name="s-1",
+        created_at=now,
+        last_activity=datetime(2024, 1, 1, 10, 0, 0),
+        metadata={
+            "cwd": str(workspace.resolve()),
+            "title": "Workspace copy",
+        },
+    )
+    app_session = SessionInfo(
+        name="s-1",
+        created_at=now,
+        last_activity=datetime(2024, 1, 1, 11, 0, 0),
+        metadata={
+            "cwd": str(workspace.resolve()),
+            "title": "App copy",
+        },
+    )
+
+    class _Manager:
+        def __init__(self, label: str, sessions: list[SessionInfo]) -> None:
+            self.base_dir = workspace / f"{label}-sessions"
+            self.workspace_dir = workspace
+            self._sessions = sessions
+
+        def list_sessions(self) -> list[SessionInfo]:
+            return self._sessions
+
+    request_manager = _Manager("workspace", [workspace_session])
+    app_manager = _Manager("app", [app_session])
+
+    def fake_get_session_manager(
+        *,
+        cwd: Any = None,
+        environment_override: Any = None,
+        respect_env_override: bool = True,
+    ) -> Any:
+        del environment_override, respect_env_override
+        if cwd is not None:
+            return request_manager
+        return app_manager
+
+    monkeypatch.setattr(
+        "fast_agent.acp.server.agent_acp_server.get_session_manager",
+        fake_get_session_manager,
+    )
+
+    response = await server.list_sessions(cwd=str(workspace))
+
+    assert len(response.sessions) == 1
+    assert response.sessions[0].session_id == "s-1"
+    assert response.sessions[0].title == "Workspace copy"
+    assert response.sessions[0].updated_at == workspace_session.last_activity.isoformat()
 
 
 @pytest.mark.asyncio

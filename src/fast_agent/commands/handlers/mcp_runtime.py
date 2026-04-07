@@ -1273,7 +1273,8 @@ async def handle_mcp_connect(
         outcome.add_message(f"Failed to connect MCP server: {error_text}", channel="error")
 
         normalized_error = error_text.lower()
-        oauth_related = "oauth" in normalized_error
+        non_oauth_startup_timeout = "non-oauth startup budget" in normalized_error
+        oauth_related = "oauth" in normalized_error and not non_oauth_startup_timeout
         oauth_registration_404 = (
             "oauth" in normalized_error and "registration failed: 404" in normalized_error
         )

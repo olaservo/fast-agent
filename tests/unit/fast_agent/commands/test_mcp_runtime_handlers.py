@@ -531,6 +531,16 @@ class _OAuthRegistration404Manager(_Manager):
         )
 
 
+class _StartupTimeoutManager(_Manager):
+    async def attach_mcp_server(self, agent_name, server_name, server_config=None, options=None):
+        del agent_name, server_name, server_config, options
+        raise RuntimeError(
+            "MCP Server: 'desktop-commander': Startup timed out after 10.0s "
+            "(non-OAuth startup budget)\n\n"
+            "Try increasing --timeout or verify server/network startup."
+        )
+
+
 class _Always404Manager(_Manager):
     def __init__(self) -> None:
         super().__init__()
@@ -982,6 +992,28 @@ async def test_handle_mcp_connect_oauth_registration_404_adds_guidance() -> None
     assert "--client-metadata-url" in message_text
     assert "--auth <token>" in message_text
     assert "GitHub Copilot MCP" in message_text
+
+
+@pytest.mark.asyncio
+async def test_handle_mcp_connect_non_oauth_timeout_does_not_add_oauth_guidance() -> None:
+    manager = _StartupTimeoutManager()
+    ctx = CommandContext(agent_provider=_Provider(), current_agent_name="main", io=_IO())
+
+    async def _capture_progress(_message: str) -> None:
+        return None
+
+    outcome = await mcp_runtime.handle_mcp_connect(
+        ctx,
+        manager=cast("mcp_runtime.McpRuntimeManager", manager),
+        agent_name="main",
+        request=_request("@wonderwhy-er/desktop-commander@latest"),
+        on_progress=_capture_progress,
+    )
+
+    message_text = "\n".join(str(msg.text) for msg in outcome.messages)
+    assert "Failed to connect MCP server" in message_text
+    assert "fast-agent auth login" not in message_text
+    assert "OAuth could not be completed in this connection mode" not in message_text
 
 
 @pytest.mark.asyncio

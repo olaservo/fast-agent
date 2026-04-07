@@ -399,6 +399,44 @@ async def test_get_server_formats_stdio_missing_cwd_without_traceback(
 
 
 @pytest.mark.asyncio
+async def test_get_server_stdio_timeout_includes_recent_stderr() -> None:
+    config = MCPServerSettings(
+        name="demo",
+        transport="stdio",
+        command="npx",
+        args=["-y", "@wonderwhy-er/desktop-commander@latest"],
+    )
+    manager = MCPConnectionManager(server_registry=cast("Any", _DummyStdioRegistry(config)))
+    server_conn = ServerConnection(
+        server_name="demo",
+        server_config=config,
+        transport_context_factory=lambda: cast("Any", object()),
+        client_session_factory=lambda *_args, **_kwargs: object(),
+    )
+    server_conn.record_stdio_stderr("npm notice downloading desktop-commander")
+    server_conn.record_stdio_stderr("npm warn request took longer than expected")
+
+    async def _fake_launch_server(*_args, **_kwargs):
+        manager.running_servers["demo"] = server_conn
+        return server_conn
+
+    manager.launch_server = _fake_launch_server  # type: ignore[method-assign]
+
+    with pytest.raises(ServerInitializationError) as exc_info:
+        await manager.get_server(
+            "demo",
+            client_session_factory=lambda *_args, **_kwargs: object(),
+            startup_timeout_seconds=0.01,
+        )
+
+    details = exc_info.value.details
+    assert "Try increasing --timeout or verify server/network startup." in details
+    assert "Recent stderr from stdio server:" in details
+    assert "npm notice downloading desktop-commander" in details
+    assert "npm warn request took longer than expected" in details
+
+
+@pytest.mark.asyncio
 async def test_connection_manager_exit_skips_grace_sleep_without_running_servers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
