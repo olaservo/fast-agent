@@ -56,6 +56,34 @@ def test_get_session_manager_normalizes_relative_environment_dir(tmp_path) -> No
         manager_second = get_session_manager(cwd=second_cwd)
         assert manager_second is manager_first
         assert manager_second.base_dir == (first_cwd / ".dev" / "sessions").resolve()
+        assert manager_second.workspace_dir == second_cwd.resolve()
+    finally:
+        reset_session_manager()
+        if original_env is None:
+            os.environ.pop("ENVIRONMENT_DIR", None)
+        else:
+            os.environ["ENVIRONMENT_DIR"] = original_env
+
+
+def test_get_session_manager_refreshes_workspace_dir_for_shared_environment(tmp_path) -> None:
+    original_env = os.environ.get("ENVIRONMENT_DIR")
+    env_dir = tmp_path / "shared-env"
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir(parents=True)
+    second_cwd.mkdir(parents=True)
+
+    os.environ["ENVIRONMENT_DIR"] = str(env_dir)
+    reset_session_manager()
+
+    try:
+        manager_first = get_session_manager(cwd=first_cwd)
+        assert manager_first.workspace_dir == first_cwd.resolve()
+
+        manager_second = get_session_manager(cwd=second_cwd)
+        assert manager_second is manager_first
+        assert manager_second.base_dir == (env_dir / "sessions").resolve()
+        assert manager_second.workspace_dir == second_cwd.resolve()
     finally:
         reset_session_manager()
         if original_env is None:

@@ -1000,4 +1000,6 @@ def get_session_manager(
             environment_override=environment_override,
             respect_env_override=respect_env_override,
         )
+    elif _session_manager.workspace_dir != resolved_cwd:
+        _session_manager.workspace_dir = resolved_cwd
     return _session_manager

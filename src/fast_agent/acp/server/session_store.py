@@ -274,6 +274,16 @@ class ACPServerSessionStore:
             candidate_session = candidate_manager.get_session(session_id)
             if candidate_session is None:
                 continue
+            persisted_cwd = self.extract_session_cwd(candidate_session.info.metadata)
+            if persisted_cwd and str(Path(persisted_cwd).expanduser().resolve()) != request_cwd:
+                logger.warning(
+                    "ACP load session cwd mismatch",
+                    name="acp_load_session_cwd_mismatch",
+                    session_id=session_id,
+                    requested_cwd=request_cwd,
+                    persisted_cwd=persisted_cwd,
+                )
+                continue
             manager = candidate_manager
             persisted_session = candidate_session
             manager_store_scope = "workspace" if index == 0 else "app"
@@ -283,17 +293,6 @@ class ACPServerSessionStore:
             self._raise_session_not_found(session_id=session_id, request_cwd=request_cwd)
         assert manager is not None
         assert persisted_session is not None
-
-        persisted_cwd = self.extract_session_cwd(persisted_session.info.metadata)
-        if persisted_cwd and str(Path(persisted_cwd).expanduser().resolve()) != request_cwd:
-            logger.warning(
-                "ACP load session cwd mismatch",
-                name="acp_load_session_cwd_mismatch",
-                session_id=session_id,
-                requested_cwd=request_cwd,
-                persisted_cwd=persisted_cwd,
-            )
-            self._raise_session_not_found(session_id=session_id, request_cwd=request_cwd)
 
         session_state, session_modes = await self._host._initialize_session_state(
             session_id,
