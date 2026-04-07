@@ -18,6 +18,7 @@ from fast_agent.ui.apply_patch_preview import (
     extract_non_command_args,
     format_apply_patch_preview,
     is_shell_execution_tool,
+    shell_syntax_language,
     style_apply_patch_preview_text,
 )
 from fast_agent.ui.message_primitives import MESSAGE_CONFIGS, MessageType
@@ -147,6 +148,40 @@ class ToolDisplay:
         display_path = self._fit_path_for_display(stripped_path, max_width)
         return f"{prefix}{display_path}{offset_suffix}"
 
+    def _build_code_tool_call_syntax(
+        self,
+        tool_args: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+    ) -> tuple[Syntax, list[str]]:
+        code_arg = str(metadata.get("code_arg") or "code")
+        language = str(metadata.get("language") or "text")
+        raw_code = tool_args.get(code_arg)
+
+        if isinstance(raw_code, str):
+            code_text = raw_code.rstrip()
+        elif raw_code is None:
+            code_text = ""
+        else:
+            code_text = json.dumps(raw_code, ensure_ascii=False, indent=2).rstrip()
+
+        footer_items: list[str] = []
+        for key, value in tool_args.items():
+            if key == code_arg:
+                continue
+            rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            footer_items.append(f"{key}: {rendered}")
+
+        return (
+            Syntax(
+                code_text,
+                language,
+                theme=self._display.code_style,
+                line_numbers=False,
+                word_wrap=False,
+            ),
+            footer_items,
+        )
+
     def _configured_output_line_limit(self) -> int | None:
         config = self._display.config
         if not config:
@@ -161,6 +196,22 @@ class ToolDisplay:
         if tool_name.startswith("agent__"):
             return tool_name[7:]
         return tool_name
+
+    @classmethod
+    def _normalize_tool_footer_items(
+        cls,
+        bottom_items: list[str] | None,
+        *,
+        display_tool_name: str,
+    ) -> list[str] | None:
+        if not bottom_items:
+            return bottom_items
+        if len(bottom_items) != 1:
+            return bottom_items
+        only_item = cls._display_tool_name(bottom_items[0])
+        if only_item == display_tool_name:
+            return None
+        return bottom_items
 
     @classmethod
     def _format_tool_call_id(cls, tool_call_id: str | None) -> str | None:
@@ -886,6 +937,10 @@ class ToolDisplay:
             metadata = metadata or {}
 
             display_tool_name = self._display_tool_name(tool_name)
+            bottom_items = self._normalize_tool_footer_items(
+                bottom_items,
+                display_tool_name=display_tool_name,
+            )
             right_info = self._build_tool_right_info(
                 f"{type_label} - {display_tool_name}",
                 tool_call_id,
@@ -900,6 +955,7 @@ class ToolDisplay:
                 highlight_index = None
                 max_item_length = 50
                 command = metadata.get("command") or tool_args.get("command")
+                preview = None
 
                 command_text = Text()
                 if command and isinstance(command, str):
@@ -918,14 +974,27 @@ class ToolDisplay:
                             )
                         )
                     else:
-                        command_text.append("$ ", style="magenta")
-                        command_text.append(command, style="white")
+                        shell_language = shell_syntax_language(
+                            metadata.get("shell_name"),
+                            shell_path=cast("str | None", metadata.get("shell_path")),
+                        )
+                        content = Syntax(
+                            command.rstrip(),
+                            shell_language,
+                            theme=self._display.code_style,
+                            line_numbers=False,
+                            word_wrap=False,
+                        )
+                        render_markdown = False
                 else:
                     command_text.append("$ ", style="magenta")
                     command_text.append("(no shell command provided)", style="dim")
+                    content = command_text
+                    render_markdown = False
 
-                content = command_text
-                render_markdown = False
+                if preview is not None:
+                    content = command_text
+                    render_markdown = False
 
                 shell_name = metadata.get("shell_name") or "shell"
                 shell_path = metadata.get("shell_path")
@@ -955,6 +1024,13 @@ class ToolDisplay:
                     bottom_items.append(
                         f"timeout: {timeout_seconds}s, warning every {warning_interval}s"
                     )
+            elif metadata.get("variant") == "code":
+                content, footer_items = self._build_code_tool_call_syntax(tool_args, metadata)
+                render_markdown = False
+                truncate_content = False
+                max_item_length = max(max_item_length or 0, 50) or None
+                if footer_items:
+                    bottom_items = [*(bottom_items or []), *footer_items]
             elif is_apply_patch_tool_name(tool_name):
                 patch_input = extract_apply_patch_input(tool_args)
                 preview = (

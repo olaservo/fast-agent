@@ -398,6 +398,7 @@ def _build_custom_tool_call(call_id: str, input_text: str) -> dict[str, Any]:
         "input": input_text,
     }
 
+
 def _build_tool_result(call_id: str, output: str) -> dict[str, Any]:
     return {
         "type": "function_call_output",
@@ -481,6 +482,7 @@ def test_continuation_planner_strips_replayed_custom_tool_calls_from_incremental
         _build_tool_result("call_patch", "ok"),
         _build_input_message("two"),
     ]
+
 
 def test_continuation_planner_replayed_assistant_only_suffix_forces_create() -> None:
     planner = StatefulContinuationResponsesWsPlanner()
@@ -675,6 +677,81 @@ async def test_websocket_stream_terminal_events_and_final_response() -> None:
     final_response = await stream.get_final_response()
     assert getattr(final_response, "status", None) == "completed"
     assert getattr(final_response, "output_text", None) == "hello"
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_reconstructs_empty_terminal_response_output() -> None:
+    messages = [
+        SimpleNamespace(
+            type=WSMsgType.TEXT,
+            data=json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "sequence_number": 1,
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_123",
+                        "call_id": "call_exec",
+                        "name": "execute",
+                        "arguments": '{"command":"pwd"}',
+                        "status": "completed",
+                    },
+                }
+            ),
+        ),
+        SimpleNamespace(
+            type=WSMsgType.TEXT,
+            data=json.dumps(
+                {
+                    "type": "response.output_item.done",
+                    "sequence_number": 2,
+                    "output_index": 1,
+                    "item": {
+                        "type": "message",
+                        "id": "msg_123",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hello"}],
+                    },
+                }
+            ),
+        ),
+        SimpleNamespace(
+            type=WSMsgType.TEXT,
+            data=json.dumps(
+                {
+                    "type": "response.completed",
+                    "sequence_number": 3,
+                    "response": {
+                        "status": "completed",
+                        "output_text": "hello",
+                        "output": [],
+                    },
+                }
+            ),
+        ),
+    ]
+    stream = WebSocketResponsesStream(_FakeWebSocket(messages))
+
+    collected: list[Any] = []
+    async for event in stream:
+        collected.append(event)
+
+    completed_response = getattr(collected[-1], "response", None)
+    assert completed_response is not None
+    assert [getattr(item, "type", None) for item in completed_response.output] == [
+        "function_call",
+        "message",
+    ]
+    assert getattr(completed_response.output[1].content[0], "text", None) == "hello"
+
+    final_response = await stream.get_final_response()
+    assert [getattr(item, "type", None) for item in final_response.output] == [
+        "function_call",
+        "message",
+    ]
+    assert getattr(final_response.output[0], "call_id", None) == "call_exec"
 
 
 @pytest.mark.asyncio

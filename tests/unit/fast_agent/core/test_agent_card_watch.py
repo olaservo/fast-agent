@@ -19,7 +19,7 @@ def _write_agent_card(
     path: Path,
     *,
     name: str = "watcher",
-    function_tools: list[str] | None = None,
+    function_tools: list[object] | None = None,
     messages_file: str | None = None,
 ) -> None:
     lines = [
@@ -28,8 +28,17 @@ def _write_agent_card(
         f"name: {name}",
     ]
     if function_tools:
+        import yaml
+
         lines.append("function_tools:")
-        lines.extend([f"  - {spec}" for spec in function_tools])
+        for spec in function_tools:
+            dumped = yaml.safe_dump(spec, sort_keys=False).rstrip().splitlines()
+            if len(dumped) == 1:
+                lines.append(f"  - {dumped[0]}")
+                continue
+            first, *rest = dumped
+            lines.append(f"  - {first}")
+            lines.extend([f"    {entry}" for entry in rest])
     if messages_file:
         lines.append(f"messages: {messages_file}")
     lines.extend(
@@ -70,6 +79,44 @@ async def test_reload_agents_detects_function_tool_change(tmp_path: Path) -> Non
     fast.load_agents(agents_dir)
 
     tool_path.write_text("def echo():\n    return 'changed'\n", encoding="utf-8")
+
+    changed = await fast.reload_agents()
+
+    assert changed is True
+
+
+@pytest.mark.asyncio
+async def test_reload_agents_detects_structured_function_tool_change(tmp_path: Path) -> None:
+    config_path = tmp_path / "fastagent.config.yaml"
+    config_path.write_text("", encoding="utf-8")
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+
+    tool_path = agents_dir / "tools.py"
+    tool_path.write_text("def echo(code: str):\n    return code\n", encoding="utf-8")
+
+    card_path = agents_dir / "watcher.md"
+    _write_agent_card(
+        card_path,
+        function_tools=[
+            {
+                "entrypoint": "tools.py:echo",
+                "variant": "code",
+                "language": "python",
+            }
+        ],
+    )
+
+    fast = FastAgent(
+        "watch-test",
+        config_path=str(config_path),
+        parse_cli_args=False,
+        quiet=True,
+    )
+    fast.load_agents(agents_dir)
+
+    tool_path.write_text("def echo(code: str):\n    return code.upper()\n", encoding="utf-8")
 
     changed = await fast.reload_agents()
 

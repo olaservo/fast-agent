@@ -9,7 +9,7 @@ from fast_agent.llm.stream_types import StreamChunk
 from fast_agent.ui import console
 from fast_agent.ui import streaming as streaming_module
 from fast_agent.ui.console_display import ConsoleDisplay, _StreamingMessageHandle
-from fast_agent.ui.stream_segments import StreamSegment, StreamSegmentAssembler
+from fast_agent.ui.stream_segments import StreamSegment, StreamSegmentAssembler, ToolCodePreview
 
 
 def _set_console_size(width: int = 80, height: int = 24) -> tuple[object | None, object | None]:
@@ -214,6 +214,55 @@ def test_diff_live_non_terminal_prints_only_final_frame() -> None:
     rendered = output.getvalue()
     assert "alpha" in rendered
     assert "\x1b[" not in rendered
+
+
+def test_render_tool_segment_uses_syntax_preview_for_code_tools() -> None:
+    handle = _make_handle("markdown")
+    output = io.StringIO()
+    renderer = Console(file=output, force_terminal=False, color_system=None, width=80)
+    segment = StreamSegment(
+        kind="tool",
+        text="",
+        tool_name="hf_hub_query_raw",
+        code_preview=ToolCodePreview(
+            code="resp = await hf_trending()\nprint(resp)",
+            language="python",
+            complete=False,
+        ),
+    )
+
+    renderer.print(handle._render_tool_segment(segment, cursor_suffix=""))
+
+    rendered = output.getvalue()
+    assert "hf_hub_query_raw" in rendered
+    assert "resp = await hf_trending()" in rendered
+    assert "print(resp)" in rendered
+
+
+def test_render_tool_segment_styles_apply_patch_preview_lines() -> None:
+    handle = _make_handle("markdown")
+    segment = StreamSegment(
+        kind="tool",
+        text=(
+            "execute\n"
+            "apply_patch preview: streaming patch (partial)\n"
+            "*** Begin Patch\n"
+            "*** Update File: a.txt\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+        ),
+        tool_name="execute",
+    )
+
+    renderable = handle._render_tool_segment(segment, cursor_suffix="")
+
+    assert isinstance(renderable, Text)
+    span_styles = {str(span.style) for span in renderable.spans}
+    assert "cyan" in span_styles
+    assert "yellow" in span_styles
+    assert "red" in span_styles
+    assert "green" in span_styles
 
 
 def test_diff_live_stop_reprints_full_truncated_frame_when_preserved() -> None:

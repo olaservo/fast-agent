@@ -122,6 +122,31 @@ def test_list_configured_detached_servers_includes_registry_entries() -> None:
     assert aggregator.list_configured_detached_servers() == ["beta"]
 
 
+def test_supplemental_attached_servers_are_not_reported_as_detached() -> None:
+    context = _build_context(
+        {
+            "alpha": MCPServerSettings(name="alpha", transport="stdio", command="echo"),
+            "stripe": MCPServerSettings(
+                name="stripe",
+                management="provider",
+                transport="http",
+                url="https://mcp.stripe.com",
+            ),
+        }
+    )
+
+    aggregator = MCPAggregator(
+        server_names=["alpha"],
+        connection_persistence=False,
+        context=context,
+    )
+    aggregator._attached_server_names = ["alpha"]
+    aggregator.set_supplemental_attached_servers(["stripe"])
+
+    assert aggregator.list_attached_servers() == ["alpha", "stripe"]
+    assert aggregator.list_configured_detached_servers() == []
+
+
 @pytest.mark.asyncio
 async def test_fetch_server_tools_optimistic_fallback_when_capability_missing() -> None:
     context = _build_context({})

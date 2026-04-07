@@ -1,7 +1,7 @@
 import json
 from contextlib import contextmanager
 from json import JSONDecodeError
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, Union
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Union
 
 from mcp.types import CallToolResult
 from rich.console import Group
@@ -403,9 +403,11 @@ class ConsoleDisplay:
         import json
         import re
 
+        from rich.protocol import is_renderable
         from rich.syntax import Syntax
 
         from fast_agent.mcp.helpers.content_helpers import get_text, is_text_content
+        from fast_agent.ui.markdown_renderables import build_markdown_renderable
 
         # Determine the style based on message type
         # USER, ASSISTANT, and SYSTEM messages should display in normal style
@@ -426,9 +428,14 @@ class ConsoleDisplay:
                     return
                 except (JSONDecodeError, TypeError, ValueError):
                     if render_markdown:
-                        prepared_content = prepare_markdown_content(content, self._escape_xml)
-                        md = Markdown(prepared_content, code_theme=CODE_STYLE)
-                        console.console.print(md, markup=self._markup)
+                        console.console.print(
+                            build_markdown_renderable(
+                                content,
+                                code_theme=CODE_STYLE,
+                                escape_xml=self._escape_xml,
+                            ),
+                            markup=self._markup,
+                        )
                     else:
                         self._print_plain_text(content, truncate=truncate, style=style)
                     return
@@ -452,9 +459,14 @@ class ConsoleDisplay:
                     # Check for markdown markers before deciding to use markdown rendering
                     if self._looks_like_markdown(content):
                         # Has markdown markers - render as markdown with escaping
-                        prepared_content = prepare_markdown_content(content, self._escape_xml)
-                        md = Markdown(prepared_content, code_theme=CODE_STYLE)
-                        console.console.print(md, markup=self._markup)
+                        console.console.print(
+                            build_markdown_renderable(
+                                content,
+                                code_theme=CODE_STYLE,
+                                escape_xml=self._escape_xml,
+                            ),
+                            markup=self._markup,
+                        )
                     else:
                         # Plain text - display as-is
                         self._print_plain_text(content, truncate=truncate, style=style)
@@ -468,10 +480,14 @@ class ConsoleDisplay:
                     # Check if it looks like markdown
                     if self._looks_like_markdown(content) and not has_substantial_xml:
                         # Escape HTML/XML tags while preserving code blocks
-                        prepared_content = prepare_markdown_content(content, self._escape_xml)
-                        md = Markdown(prepared_content, code_theme=CODE_STYLE)
-                        # Markdown handles its own styling, don't apply style
-                        console.console.print(md, markup=self._markup)
+                        console.console.print(
+                            build_markdown_renderable(
+                                content,
+                                code_theme=CODE_STYLE,
+                                escape_xml=self._escape_xml,
+                            ),
+                            markup=self._markup,
+                        )
                     else:
                         # Plain text (or mixed markdown+XML content)
                         self._print_plain_text(content, truncate=truncate, style=style)
@@ -513,9 +529,14 @@ class ConsoleDisplay:
                     # Check if the first part has markdown
                     if self._looks_like_markdown(markdown_part):
                         # Render markdown part
-                        prepared_content = prepare_markdown_content(markdown_part, self._escape_xml)
-                        md = Markdown(prepared_content, code_theme=CODE_STYLE)
-                        console.console.print(md, markup=self._markup)
+                        console.console.print(
+                            build_markdown_renderable(
+                                markdown_part,
+                                code_theme=CODE_STYLE,
+                                escape_xml=self._escape_xml,
+                            ),
+                            markup=self._markup,
+                        )
 
                         # Then render any additional styled segments
                         if markdown_end < len(plain_text):
@@ -531,13 +552,20 @@ class ConsoleDisplay:
                         console.console.print(content, markup=self._markup)
                 else:
                     # Simple case: entire text should be rendered as markdown
-                    prepared_content = prepare_markdown_content(plain_text, self._escape_xml)
-                    md = Markdown(prepared_content, code_theme=CODE_STYLE)
-                    console.console.print(md, markup=self._markup)
+                    console.console.print(
+                        build_markdown_renderable(
+                            plain_text,
+                            code_theme=CODE_STYLE,
+                            escape_xml=self._escape_xml,
+                        ),
+                        markup=self._markup,
+                    )
             else:
                 # No markdown markers, print as regular Rich Text
                 console.console.print(content, markup=self._markup)
         elif isinstance(content, Group):
+            console.console.print(content, markup=self._markup)
+        elif is_renderable(content):
             console.console.print(content, markup=self._markup)
         elif isinstance(content, list):
             # Handle content blocks (for tool results)
@@ -933,6 +961,7 @@ class ConsoleDisplay:
         name: str | None = None,
         model: str | None = None,
         show_hook_indicator: bool = False,
+        tool_metadata_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
     ) -> Iterator[StreamingHandle]:
         """Create a streaming context for assistant messages."""
         if not display_chat_enabled():
@@ -975,6 +1004,7 @@ class ConsoleDisplay:
             header_left=left,
             header_right=right_info,
             tool_header_name=name,
+            tool_metadata_resolver=tool_metadata_resolver,
             progress_display=progress_display,
         )
         try:
@@ -1057,6 +1087,8 @@ class ConsoleDisplay:
             return
 
         from urllib.parse import urlparse
+
+        console.configure_console_stream("stdout")
 
         # Extract domain for security display
         parsed = urlparse(url)

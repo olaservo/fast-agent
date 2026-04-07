@@ -166,7 +166,18 @@ DEFAULT_USE_HISTORY_BY_TYPE: dict[CardType, bool] = {
     "MAKER": True,
 }
 
-MCP_CONNECT_ALLOWED_KEYS = frozenset({"target", "name", "headers", "auth"})
+MCP_CONNECT_ALLOWED_KEYS = frozenset(
+    {
+        "target",
+        "name",
+        "description",
+        "management",
+        "headers",
+        "access_token",
+        "defer_loading",
+        "auth",
+    }
+)
 
 
 def normalize_card_type(raw_type: str | None) -> CardType | None:

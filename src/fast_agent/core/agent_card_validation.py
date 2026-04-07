@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 import yaml
 from frontmatter import loads as load_frontmatter
 
+from fast_agent.config import resolve_env_vars
 from fast_agent.core.agent_card_rules import (
     ALLOWED_FIELDS_BY_TYPE,
     MCP_CONNECT_ALLOWED_KEYS,
@@ -27,6 +28,11 @@ from fast_agent.core.validation import (
     get_card_dependency_field_specs,
 )
 from fast_agent.mcp.connect_targets import resolve_target_entry
+from fast_agent.tools.function_tool_config import (
+    FunctionToolSpec,
+    function_tool_entrypoint,
+    parse_function_tool_card_entry,
+)
 from fast_agent.utils.type_narrowing import is_str_object_dict
 
 CARD_EXTENSIONS = {".md", ".markdown", ".yaml", ".yml"}
@@ -55,7 +61,7 @@ class LoadedAgentIssue:
 class _ScannedCardDetails:
     result: AgentCardScanResult
     servers: list[str]
-    function_tools: list[str]
+    function_tools: list[str | FunctionToolSpec]
     messages: list[str]
     shell_cwd: Path | None
 
@@ -212,7 +218,7 @@ def _scan_single_agent_card_file(card_path: Path) -> _ScannedCardDetails:
 
     servers = _ensure_str_list(raw.get("servers"), "servers", errors)
     _validate_mcp_connect_entries(raw.get("mcp_connect"), errors)
-    function_tools = _ensure_str_list(raw.get("function_tools"), "function_tools", errors)
+    function_tools = _ensure_function_tool_list(raw.get("function_tools"), "function_tools", errors)
     messages = _ensure_str_list(raw.get("messages"), "messages", errors)
     _validate_tool_input_schema(raw.get("tool_input_schema"), errors)
     shell_cwd = _resolve_shell_cwd(raw.get("cwd"), errors)
@@ -273,7 +279,10 @@ def _apply_supplemental_scan_checks(
     if details.function_tools:
         base_path = entry.path.parent
         for spec in details.function_tools:
-            error = _check_function_tool_spec(spec, base_path)
+            entrypoint = function_tool_entrypoint(spec)
+            if entrypoint is None:
+                continue
+            error = _check_function_tool_spec(entrypoint, base_path)
             if error:
                 errors.append(error)
 
@@ -464,7 +473,10 @@ def _load_card_raw(path: Path) -> tuple[dict[str, Any], str | None]:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("AgentCard YAML must be a mapping")
-        return data, None
+        resolved = resolve_env_vars(data)
+        if not isinstance(resolved, dict):
+            raise ValueError("AgentCard YAML must be a mapping")
+        return resolved, None
     if suffix in {".md", ".markdown"}:
         raw_text = path.read_text(encoding="utf-8")
         if raw_text.startswith("\ufeff"):
@@ -473,7 +485,10 @@ def _load_card_raw(path: Path) -> tuple[dict[str, Any], str | None]:
         metadata = post.metadata or {}
         if not isinstance(metadata, dict):
             raise ValueError("Frontmatter must be a mapping")
-        return dict(metadata), post.content or ""
+        resolved = resolve_env_vars(dict(metadata))
+        if not isinstance(resolved, dict):
+            raise ValueError("Frontmatter must be a mapping")
+        return resolved, post.content or ""
     raise ValueError("Unsupported AgentCard file extension")
 
 
@@ -628,10 +643,40 @@ def _validate_mcp_connect_entries(value: Any, errors: list[str]) -> None:
                 continue
             resolved_auth = auth_value.copy()
 
+        management_value = raw_entry.get("management")
+        if management_value is not None and (
+            not isinstance(management_value, str) or not management_value.strip()
+        ):
+            errors.append(f"'mcp_connect[{idx}].management' must be a non-empty string")
+            continue
+
+        description_value = raw_entry.get("description")
+        if description_value is not None and not isinstance(description_value, str):
+            errors.append(f"'mcp_connect[{idx}].description' must be a string")
+            continue
+
+        access_token_value = raw_entry.get("access_token")
+        if access_token_value is not None and not isinstance(access_token_value, str):
+            errors.append(f"'mcp_connect[{idx}].access_token' must be a string")
+            continue
+
+        defer_loading_value = raw_entry.get("defer_loading")
+        if defer_loading_value is not None and not isinstance(defer_loading_value, bool):
+            errors.append(f"'mcp_connect[{idx}].defer_loading' must be a boolean")
+            continue
+
         try:
             overrides: dict[str, Any] = {}
+            if isinstance(description_value, str):
+                overrides["description"] = description_value
+            if isinstance(management_value, str):
+                overrides["management"] = management_value
             if resolved_headers is not None:
                 overrides["headers"] = resolved_headers
+            if isinstance(access_token_value, str):
+                overrides["access_token"] = access_token_value
+            if isinstance(defer_loading_value, bool):
+                overrides["defer_loading"] = defer_loading_value
             if resolved_auth is not None:
                 overrides["auth"] = resolved_auth
             resolve_target_entry(
@@ -732,5 +777,33 @@ def _loaded_agent_dependencies(agent_data: dict[str, Any]) -> set[str]:
 
 def _iter_function_tool_specs(tool_specs: Iterable[Any]) -> Iterable[str]:
     for spec in tool_specs:
-        if isinstance(spec, str):
-            yield spec
+        entrypoint = function_tool_entrypoint(spec)
+        if entrypoint:
+            yield entrypoint
+
+
+def _ensure_function_tool_list(
+    raw_value: object,
+    field_name: str,
+    errors: list[str],
+) -> list[str | FunctionToolSpec]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        return [raw_value]
+    if not isinstance(raw_value, list):
+        errors.append(f"'{field_name}' must be a string or list")
+        return []
+
+    values: list[str | FunctionToolSpec] = []
+    for index, entry in enumerate(raw_value):
+        try:
+            values.append(
+                parse_function_tool_card_entry(
+                    entry,
+                    field_path=f"{field_name}[{index}]",
+                )
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+    return values

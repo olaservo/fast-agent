@@ -503,11 +503,20 @@ class Session:
 class SessionManager:
     """Manages conversation sessions stored in the fast-agent environment."""
 
-    def __init__(self, *, cwd: pathlib.Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: pathlib.Path | None = None,
+        environment_override: str | pathlib.Path | None = None,
+        respect_env_override: bool = True,
+    ) -> None:
         """Initialize session manager."""
         base = (cwd or pathlib.Path.cwd()).resolve()
-        env_override = _normalized_environment_override(base)
+        env_override = environment_override
+        if env_override is None:
+            env_override = _normalized_environment_override(base) if respect_env_override else None
         env_paths = resolve_environment_paths(cwd=base, override=env_override)
+        self.workspace_dir = base
         self.base_dir = env_paths.sessions
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._current_session: Session | None = None
@@ -963,15 +972,34 @@ def reset_session_manager() -> None:
     _session_manager = None
 
 
-def get_session_manager(*, cwd: pathlib.Path | None = None) -> SessionManager:
+def get_session_manager(
+    *,
+    cwd: pathlib.Path | None = None,
+    environment_override: str | pathlib.Path | None = None,
+    respect_env_override: bool = True,
+) -> SessionManager:
     """Get or create the global session manager."""
     global _session_manager
     resolved_cwd = cwd.resolve() if cwd is not None else pathlib.Path.cwd().resolve()
-    env_override = _normalized_environment_override(resolved_cwd)
+    env_override = environment_override
+    if env_override is None:
+        env_override = (
+            _normalized_environment_override(resolved_cwd) if respect_env_override else None
+        )
     expected_paths = resolve_environment_paths(cwd=resolved_cwd, override=env_override)
     if _session_manager is None:
-        _session_manager = SessionManager(cwd=cwd)
+        _session_manager = SessionManager(
+            cwd=cwd,
+            environment_override=environment_override,
+            respect_env_override=respect_env_override,
+        )
         return _session_manager
     if _session_manager.base_dir != expected_paths.sessions:
-        _session_manager = SessionManager(cwd=cwd)
+        _session_manager = SessionManager(
+            cwd=cwd,
+            environment_override=environment_override,
+            respect_env_override=respect_env_override,
+        )
+    elif _session_manager.workspace_dir != resolved_cwd:
+        _session_manager.workspace_dir = resolved_cwd
     return _session_manager

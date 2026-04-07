@@ -11,6 +11,7 @@ from collections import OrderedDict
 from hashlib import blake2b
 from typing import TYPE_CHECKING
 
+from fast_agent.ui.markdown_renderables import build_markdown_renderable
 from fast_agent.ui.streaming_buffer import StreamBuffer
 
 if TYPE_CHECKING:
@@ -76,11 +77,14 @@ class MarkdownTruncator:
             self._height_cache.move_to_end(cache_key)
             return cached
         try:
-            from rich.markdown import Markdown
-
             options = console.options.update(width=width)
             lines = console.render_lines(
-                Markdown(text, code_theme=code_theme),
+                build_markdown_renderable(
+                    text,
+                    code_theme=code_theme,
+                    escape_xml=False,
+                    close_incomplete_fences=True,
+                ),
                 options=options,
                 pad=False,
             )

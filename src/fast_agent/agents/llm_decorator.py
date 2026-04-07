@@ -203,6 +203,7 @@ class LlmDecorator(StreamingAgentMixin, AgentProtocol):
         # Initialize the LLM to None (will be set by attach_llm)
         self._llm: FastAgentLLMProtocol | None = None
         self._initialized = False
+        self._shutdown_complete = False
         self._llm_factory_ref: LLMFactoryProtocol | None = None
         self._llm_attach_kwargs: dict[str, Any] | None = None
         self._lifecycle_hooks: "AgentLifecycleHooks | None" = None
@@ -225,15 +226,19 @@ class LlmDecorator(StreamingAgentMixin, AgentProtocol):
     async def initialize(self) -> None:
         await self._run_lifecycle_hook("on_start")
         self.initialized = True
+        self._shutdown_complete = False
 
     async def shutdown(self) -> None:
         await self._finalize_shutdown()
 
     async def _finalize_shutdown(self, *, run_hook: bool = True) -> None:
+        if self._shutdown_complete:
+            return
         if run_hook:
             await self._run_lifecycle_hook("on_shutdown")
         await self._close_llm_resources()
         self.initialized = False
+        self._shutdown_complete = True
 
     async def _close_llm_resources(self) -> None:
         """Close optional LLM-owned resources (for example persistent transports)."""

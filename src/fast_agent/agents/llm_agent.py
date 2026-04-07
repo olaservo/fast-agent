@@ -10,8 +10,8 @@ This class extends LlmDecorator with LLM-specific interaction behaviors includin
 
 import json
 import os
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 from a2a.types import AgentCapabilities
 from mcp import Tool
@@ -28,6 +28,7 @@ from fast_agent.constants import (
 )
 from fast_agent.context import Context
 from fast_agent.core.logging.logger import get_logger
+from fast_agent.history.tool_activities import display_remote_tool_activities
 from fast_agent.llm.model_display_name import resolve_llm_display_name
 from fast_agent.mcp.helpers.content_helpers import get_text
 from fast_agent.types import PromptMessageExtended, RequestParams
@@ -177,18 +178,30 @@ class LlmAgent(LlmDecorator):
         hook_indicator = self._resolve_assistant_hook_indicator(show_hook_indicator)
         message_text = message
         if render_message:
-            await self.display.show_assistant_message(
-                message_text,
-                bottom_items=bottom_items,
-                highlight_index=highlight_index,
-                max_item_length=max_item_length,
+            rendered_remote_activities = display_remote_tool_activities(
+                self.display,
+                message,
                 name=display_name,
-                model=display_model,
-                additional_message=additional_message_text,
-                pre_content=pre_content,
-                render_markdown=render_markdown,
-                show_hook_indicator=hook_indicator,
             )
+            should_render_assistant_message = not (
+                rendered_remote_activities
+                and message.last_text() is None
+                and additional_message_text is None
+                and pre_content is None
+            )
+            if should_render_assistant_message:
+                await self.display.show_assistant_message(
+                    message_text,
+                    bottom_items=bottom_items,
+                    highlight_index=highlight_index,
+                    max_item_length=max_item_length,
+                    name=display_name,
+                    model=display_model,
+                    additional_message=additional_message_text,
+                    pre_content=pre_content,
+                    render_markdown=render_markdown,
+                    show_hook_indicator=hook_indicator,
+                )
         else:
             if status_message_text is not None:
                 self.display.show_status_message(status_message_text)
@@ -601,6 +614,11 @@ class LlmAgent(LlmDecorator):
         self._force_non_streaming_reason = reason
         return True
 
+    def resolve_stream_tool_metadata(self, tool_name: str) -> Mapping[str, Any] | None:
+        """Resolve display metadata for a streamed tool call, if available."""
+        _ = tool_name
+        return None
+
     async def generate_impl(
         self,
         messages: List[PromptMessageExtended],
@@ -638,6 +656,7 @@ class LlmAgent(LlmDecorator):
             with self.display.streaming_assistant_message(
                 name=display_name,
                 model=display_model,
+                tool_metadata_resolver=self.resolve_stream_tool_metadata,
             ) as stream_handle:
                 self._active_stream_handle = stream_handle
                 write_interactive_trace(

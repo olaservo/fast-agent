@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fast_agent.session import (
     SessionEntrySummary,
@@ -11,6 +12,9 @@ from fast_agent.session import (
     format_session_entries,
     get_session_manager,
 )
+
+if TYPE_CHECKING:
+    from fast_agent.session import SessionManager
 
 
 @dataclass(slots=True)
@@ -28,8 +32,12 @@ FULL_SESSION_USAGE = (
 )
 
 
-def build_session_list_summary(*, show_help: bool = False) -> SessionListSummary:
-    manager = get_session_manager()
+def build_session_list_summary(
+    *,
+    manager: "SessionManager | None" = None,
+    show_help: bool = False,
+) -> SessionListSummary:
+    manager = manager or get_session_manager()
     sessions = apply_session_window(manager.list_sessions())
 
     current = manager.current_session

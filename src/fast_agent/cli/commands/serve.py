@@ -36,6 +36,21 @@ class MissingShellCwdPolicy(str, Enum):
     ERROR = "error"
 
 
+def _resolve_instance_scope(
+    ctx: typer.Context,
+    *,
+    transport: ServeTransport,
+    instance_scope: InstanceScope,
+) -> InstanceScope:
+    """Apply transport-specific defaults without overriding explicit flags."""
+    parameter_source = ctx.get_parameter_source("instance_scope")
+    if transport == ServeTransport.ACP and (
+        parameter_source is None or parameter_source.name == "DEFAULT"
+    ):
+        return InstanceScope.CONNECTION
+    return instance_scope
+
+
 def _build_run_request(
     *,
     ctx: typer.Context,
@@ -204,7 +219,11 @@ def serve(
         host=host,
         port=port,
         shell=shell,
-        instance_scope=instance_scope,
+        instance_scope=_resolve_instance_scope(
+            ctx,
+            transport=transport,
+            instance_scope=instance_scope,
+        ),
         no_permissions=no_permissions,
         reload=reload,
         watch=watch,

@@ -53,6 +53,7 @@ from fast_agent.llm.reasoning_effort import format_reasoning_setting, parse_reas
 from fast_agent.llm.request_params import RequestParams
 from fast_agent.llm.text_verbosity import parse_text_verbosity
 from fast_agent.mcp.prompt_message_extended import PromptMessageExtended
+from fast_agent.mcp.provider_management import build_openai_provider_managed_mcp_tools
 from fast_agent.tools.apply_patch_tool import get_openai_responses_custom_tool_payload
 from fast_agent.types.llm_stop_reason import LlmStopReason
 
@@ -692,6 +693,17 @@ class ResponsesLLM(
                 )
             base_args["tools"] = tools_payload
 
+        if self.provider_managed_mcp_state.has_servers():
+            if self.provider not in {Provider.RESPONSES, Provider.CODEX_RESPONSES}:
+                raise ModelConfigError(
+                    "Provider-managed MCP is not supported for this Responses-family provider."
+                )
+            tools_payload = base_args.setdefault("tools", [])
+            if isinstance(tools_payload, list):
+                tools_payload.extend(
+                    build_openai_provider_managed_mcp_tools(self.provider_managed_mcp_state)
+                )
+
         resolved_web_search = resolve_web_search(
             self._openai_settings(),
             web_search_override=self._web_search_override,
@@ -884,10 +896,12 @@ class ResponsesLLM(
             self._record_usage(response.usage, model_name)
 
         web_tool_payloads, citation_payloads = self._extract_web_search_metadata(response)
-        if web_tool_payloads:
+        provider_mcp_payloads = self._extract_provider_mcp_metadata(response)
+        server_tool_payloads = [*web_tool_payloads, *provider_mcp_payloads]
+        if server_tool_payloads:
             if channels is None:
                 channels = {}
-            channels[ANTHROPIC_SERVER_TOOLS_CHANNEL] = web_tool_payloads
+            channels[ANTHROPIC_SERVER_TOOLS_CHANNEL] = server_tool_payloads
         if citation_payloads:
             if channels is None:
                 channels = {}

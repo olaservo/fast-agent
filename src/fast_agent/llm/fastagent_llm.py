@@ -72,6 +72,7 @@ from fast_agent.llm.text_verbosity import (
 )
 from fast_agent.llm.usage_tracking import TurnUsage, UsageAccumulator
 from fast_agent.mcp.helpers.content_helpers import get_text
+from fast_agent.mcp.provider_management import ProviderManagedMCPState
 from fast_agent.types import PromptMessageExtended, RequestParams
 
 # Define type variables locally
@@ -255,6 +256,7 @@ class FastAgentLLM(ContextDependent, FastAgentLLMProtocol, Generic[MessageParamT
         self._tool_stream_listeners: set[Callable[[str, dict[str, Any] | None], None]] = set()
         self.retry_count = self._resolve_retry_count()
         self.retry_backoff_seconds: float = 10.0
+        self._provider_managed_mcp_state = ProviderManagedMCPState()
 
     def _resolved_model_matches(self, model_name: str | None) -> bool:
         if not model_name:
@@ -1307,6 +1309,13 @@ class FastAgentLLM(ContextDependent, FastAgentLLMProtocol, Generic[MessageParamT
             The Provider enum value representing the LLM provider
         """
         return self._provider
+
+    @property
+    def provider_managed_mcp_state(self) -> ProviderManagedMCPState:
+        return self._provider_managed_mcp_state
+
+    def set_provider_managed_mcp_state(self, state: ProviderManagedMCPState) -> None:
+        self._provider_managed_mcp_state = state
 
     @property
     def model_name(self) -> str | None:

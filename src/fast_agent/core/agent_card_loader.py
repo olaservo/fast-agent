@@ -17,6 +17,7 @@ from fast_agent.agents.agent_types import (
     FunctionToolConfig,
     MCPConnectTarget,
 )
+from fast_agent.config import resolve_env_vars
 from fast_agent.constants import DEFAULT_AGENT_INSTRUCTION, SMART_AGENT_INSTRUCTION
 from fast_agent.core.agent_card_rules import (
     AGENT_TYPE_TO_CARD_TYPE,
@@ -33,6 +34,10 @@ from fast_agent.core.direct_decorators import _resolve_instruction
 from fast_agent.core.exceptions import AgentConfigError
 from fast_agent.core.tool_input_schema import validate_tool_input_schema
 from fast_agent.skills import SKILLS_DEFAULT
+from fast_agent.tools.function_tool_config import (
+    parse_function_tool_card_entry,
+    serialize_function_tools,
+)
 from fast_agent.types import RequestParams
 from fast_agent.utils.type_narrowing import is_str_object_dict
 
@@ -112,7 +117,10 @@ def _load_yaml_card(path: Path) -> dict[str, Any]:
 
     if not isinstance(data, dict):
         raise AgentConfigError(f"AgentCard YAML must be a mapping in {path}")
-    return data
+    resolved = resolve_env_vars(data)
+    if not isinstance(resolved, dict):
+        raise AgentConfigError(f"AgentCard YAML must be a mapping in {path}")
+    return resolved
 
 
 def _load_markdown_card(path: Path) -> tuple[dict[str, Any], str]:
@@ -129,7 +137,10 @@ def _load_markdown_card(path: Path) -> tuple[dict[str, Any], str]:
         raise AgentConfigError(f"Frontmatter must be a mapping in {path}")
 
     body = post.content or ""
-    return dict(metadata), body
+    resolved = resolve_env_vars(dict(metadata))
+    if not isinstance(resolved, dict):
+        raise AgentConfigError(f"Frontmatter must be a mapping in {path}")
+    return resolved, body
 
 
 def _markdown_has_frontmatter(path: Path) -> bool:
@@ -349,14 +360,22 @@ def _build_agent_data(
     api_key = raw.get("api_key")
     tool_input_schema = _ensure_tool_input_schema(raw.get("tool_input_schema"), path)
 
-    # Parse function_tools - can be a string or list of strings
+    # Parse function_tools - can be a string or list of strings / metadata objects
     function_tools_raw = raw.get("function_tools")
     function_tools: list[FunctionToolConfig] | None = None
     if function_tools_raw is not None:
         if isinstance(function_tools_raw, str):
             function_tools = [function_tools_raw]
         elif isinstance(function_tools_raw, list):
-            function_tools = [str(t) for t in function_tools_raw]
+            function_tools = [
+                parse_function_tool_card_entry(
+                    entry,
+                    field_path=f"function_tools[{index}]",
+                )
+                for index, entry in enumerate(function_tools_raw)
+            ]
+        else:
+            raise AgentConfigError(f"'function_tools' must be a string or list in {path}")
 
     # Parse shell and cwd for sub-agent shell access
     shell_default = True if type_key == "smart" else False
@@ -624,12 +643,39 @@ def _ensure_mcp_connect_entries(value: Any, path: Path) -> list[MCPConnectTarget
 
         headers = _ensure_headers_map(raw_entry.get("headers"), f"mcp_connect[{idx}].headers", path)
         auth = _ensure_auth_map(raw_entry.get("auth"), f"mcp_connect[{idx}].auth", path)
+        description = _ensure_optional_str(
+            raw_entry.get("description"),
+            f"mcp_connect[{idx}].description",
+            path,
+        )
+        management = _ensure_optional_str(
+            raw_entry.get("management"),
+            f"mcp_connect[{idx}].management",
+            path,
+        )
+        access_token = _ensure_optional_str(
+            raw_entry.get("access_token"),
+            f"mcp_connect[{idx}].access_token",
+            path,
+        )
+        defer_loading_raw = raw_entry.get("defer_loading")
+        defer_loading = _ensure_bool(
+            defer_loading_raw,
+            f"mcp_connect[{idx}].defer_loading",
+            path,
+        )
+        if defer_loading_raw is None:
+            defer_loading = None
 
         entries.append(
             MCPConnectTarget(
                 target=target_raw.strip(),
                 name=name_raw.strip() if isinstance(name_raw, str) else None,
+                description=description,
+                management=management,
                 headers=headers,
+                access_token=access_token,
+                defer_loading=defer_loading,
                 auth=auth,
             )
         )
@@ -872,8 +918,16 @@ def _serialize_mcp_connect_targets(targets: list[MCPConnectTarget]) -> list[dict
         serialized_entry: dict[str, Any] = {"target": entry.target}
         if entry.name:
             serialized_entry["name"] = entry.name
+        if entry.description:
+            serialized_entry["description"] = entry.description
+        if entry.management:
+            serialized_entry["management"] = entry.management
         if entry.headers is not None:
             serialized_entry["headers"] = dict(entry.headers)
+        if entry.access_token is not None:
+            serialized_entry["access_token"] = entry.access_token
+        if entry.defer_loading is not None:
+            serialized_entry["defer_loading"] = entry.defer_loading
         if entry.auth is not None:
             serialized_entry["auth"] = dict(entry.auth)
         serialized_targets.append(serialized_entry)
@@ -891,7 +945,9 @@ def _serialize_agent_like_fields(
 
     _serialize_agents_as_tools_options(card, agent_data.get("agents_as_tools_options"))
 
-    function_tools = _serialize_string_list(agent_data.get("function_tools"))
+    function_tools = serialize_function_tools(agent_data.get("function_tools"))
+    if function_tools is None:
+        function_tools = serialize_function_tools(config.function_tools)
     if function_tools is not None:
         card["function_tools"] = function_tools
 

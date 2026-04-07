@@ -12,6 +12,7 @@ from rich.text import Text
 
 from fast_agent.commands.history_summaries import build_history_turn_report
 from fast_agent.constants import FAST_AGENT_TIMING, FAST_AGENT_TOOL_TIMING
+from fast_agent.history.tool_activities import remote_tool_activities
 from fast_agent.mcp.helpers.content_helpers import get_text
 from fast_agent.types.conversation_summary import ConversationSummary
 
@@ -335,9 +336,11 @@ def _build_history_rows(history: Sequence[PromptMessageExtended]) -> list[dict]:
         timeline_role = role
         include_in_timeline = True
         result_rows: list[dict] = []
+        provider_rows: list[dict] = []
         tool_result_total_chars = 0
         tool_result_has_non_text = False
         tool_result_has_error = False
+        provider_events = remote_tool_activities(message)
 
         if tool_calls:
             names: list[str] = []
@@ -390,6 +393,60 @@ def _build_history_rows(history: Sequence[PromptMessageExtended]) -> list[dict]:
             if result_names:
                 detail_sections.append(_format_tool_detail("result→", result_names))
 
+        for event in provider_events:
+            if event.kind == "call":
+                try:
+                    arguments_text = json.dumps(
+                        event.arguments or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                except Exception:
+                    arguments_text = "{}"
+                provider_rows.append(
+                    {
+                        "role": "tool",
+                        "timeline_role": "tool",
+                        "chars": len(_normalize_text(arguments_text)),
+                        "preview": _preview_text(arguments_text),
+                        "details": Text(event.tool_name, style=Colours.TOOL_DETAIL),
+                        "label": event.type_label,
+                        "arrow": "◀",
+                        "non_text": False,
+                        "has_tool_request": False,
+                        "hide_summary": False,
+                        "include_in_timeline": False,
+                        "is_error": False,
+                        "timing_ms": None,
+                        "transport_channel": None,
+                    }
+                )
+                continue
+            if event.result is None:
+                continue
+            summary, result_chars, result_non_text = _extract_tool_result_summary(event.result)
+            tool_result_total_chars += result_chars
+            tool_result_has_non_text = tool_result_has_non_text or result_non_text
+            provider_rows.append(
+                {
+                    "role": "tool",
+                    "timeline_role": "tool",
+                    "chars": result_chars,
+                    "preview": summary,
+                    "details": Text(event.tool_name, style=Colours.TOOL_DETAIL),
+                    "label": event.type_label,
+                    "arrow": "▶",
+                    "non_text": result_non_text,
+                    "has_tool_request": False,
+                    "hide_summary": False,
+                    "include_in_timeline": False,
+                    "is_error": event.is_error,
+                    "timing_ms": None,
+                    "transport_channel": None,
+                }
+            )
+            tool_result_has_error = tool_result_has_error or event.is_error
+
         if detail_sections:
             if len(detail_sections) == 1:
                 details: Text | None = detail_sections[0]
@@ -408,6 +465,7 @@ def _build_history_rows(history: Sequence[PromptMessageExtended]) -> list[dict]:
         row_non_text = row_non_text or tool_result_has_non_text
         row_is_error = tool_result_has_error
 
+        rows.extend(provider_rows)
         rows.append(
             {
                 "role": role,
@@ -751,8 +809,8 @@ def display_history_overview(
     for offset, row in enumerate(summary_rows):
         role = row["role"]
         color = _get_role_color(role, is_error=row.get("is_error", False))
-        arrow = role_arrows.get(role, "▶")
-        label = role_labels.get(role, role)
+        arrow = row.get("arrow", role_arrows.get(role, "▶"))
+        label = row.get("label", role_labels.get(role, role))
         if role == "assistant" and row.get("has_tool_request"):
             label = f"{label}*"
         chars = row["chars"]

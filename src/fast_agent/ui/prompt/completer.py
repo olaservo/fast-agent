@@ -22,6 +22,7 @@ from fast_agent.commands.handlers import model as model_handlers
 from fast_agent.config import get_settings
 from fast_agent.llm.reasoning_effort import available_reasoning_values
 from fast_agent.llm.text_verbosity import available_text_verbosity_values
+from fast_agent.mcp.provider_management import provider_managed_base_url
 from fast_agent.ui.prompt.attachment_tokens import (
     FILE_MENTION_SERVER,
     URL_MENTION_SERVER,
@@ -736,15 +737,20 @@ class AgentCompleter(Completer):
 
     @staticmethod
     def _configured_mcp_server_target(server_config: Any) -> str | None:
+        management_value: Any
         url_value: Any
         if isinstance(server_config, dict):
+            management_value = server_config.get("management")
             url_value = server_config.get("url")
         else:
+            management_value = getattr(server_config, "management", None)
             url_value = getattr(server_config, "url", None)
 
         if isinstance(url_value, str):
             normalized = url_value.strip()
             if normalized:
+                if management_value == "provider":
+                    return provider_managed_base_url(normalized)
                 return normalized
 
         command_value: Any

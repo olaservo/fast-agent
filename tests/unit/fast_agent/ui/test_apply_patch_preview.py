@@ -2,6 +2,8 @@ from fast_agent.ui.apply_patch_preview import (
     build_apply_patch_preview,
     extract_apply_patch_text,
     extract_non_command_args,
+    extract_partial_apply_patch_text,
+    format_partial_apply_patch_preview,
     is_shell_execution_tool,
     render_patch_preview,
     style_apply_patch_preview_text,
@@ -57,6 +59,23 @@ def test_extract_apply_patch_text_returns_none_when_markers_missing() -> None:
     assert extract_apply_patch_text("apply_patch 'not a patch'") is None
 
 
+def test_extract_partial_apply_patch_text_returns_tail_without_end_marker() -> None:
+    command = (
+        "apply_patch <<'PATCH'\n"
+        "*** Begin Patch\n"
+        "*** Update File: foo.py\n"
+        "@@\n"
+        "-old\n"
+        "+new"
+    )
+
+    patch_text = extract_partial_apply_patch_text(command)
+
+    assert patch_text is not None
+    assert patch_text.startswith("*** Begin Patch")
+    assert patch_text.endswith("+new")
+
+
 def test_summarize_patch_counts_operations() -> None:
     patch_text = (
         "*** Begin Patch\n"
@@ -109,6 +128,16 @@ def test_render_patch_preview_truncates_large_patches() -> None:
     assert "(+2 more lines)" in rendered
 
 
+def test_format_partial_apply_patch_preview_marks_streaming_patch() -> None:
+    text = format_partial_apply_patch_preview(
+        "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new"
+    )
+
+    assert text.startswith("apply_patch preview:")
+    assert "streaming patch (partial)" in text
+    assert "*** Update File: a.txt" in text
+
+
 def test_is_shell_execution_tool_supports_aliases_and_namespaces() -> None:
     assert is_shell_execution_tool("execute")
     assert is_shell_execution_tool("bash")
@@ -141,6 +170,25 @@ def test_style_apply_patch_preview_text_applies_diff_line_styles() -> None:
     span_styles = {str(span.style) for span in styled.spans}
 
     assert styled.plain == text
+    assert "cyan" in span_styles
+    assert "yellow" in span_styles
+    assert "red" in span_styles
+    assert "green" in span_styles
+
+
+def test_style_apply_patch_preview_text_handles_leading_spaces() -> None:
+    text = (
+        "  apply_patch preview: streaming patch (partial)\n"
+        "  *** Update File: a.txt\n"
+        "  @@\n"
+        "  -old\n"
+        "  +new\n"
+    )
+
+    styled = style_apply_patch_preview_text(text, default_style="white")
+    span_styles = {str(span.style) for span in styled.spans}
+
+    assert "bold white" in span_styles
     assert "cyan" in span_styles
     assert "yellow" in span_styles
     assert "red" in span_styles

@@ -24,6 +24,11 @@ from fast_agent.core.exceptions import ConfigFileError
 from fast_agent.llm.reasoning_effort import ReasoningEffortSetting
 from fast_agent.llm.structured_output_mode import StructuredOutputMode
 from fast_agent.llm.text_verbosity import TextVerbosityLevel
+from fast_agent.mcp.provider_management import (
+    normalize_access_token,
+    normalize_client_managed_url_server,
+    normalize_provider_managed_url_server,
+)
 from fast_agent.utils.type_narrowing import is_str_object_dict
 
 
@@ -305,6 +310,9 @@ class MCPServerSettings(BaseModel):
     description: str | None = None
     """The description of the server."""
 
+    management: Literal["client", "provider"] = "client"
+    """Whether fast-agent connects locally or delegates MCP execution to the provider."""
+
     transport: Literal["stdio", "sse", "http"] = "stdio"
     """The transport mechanism."""
 
@@ -337,6 +345,9 @@ class MCPServerSettings(BaseModel):
 
     headers: dict[str, str] | None = None
     """Headers dictionary for HTTP connections"""
+
+    access_token: str | None = None
+    """Provider-neutral bearer token for local URL servers or provider-managed MCP."""
 
     auth: MCPServerAuthSettings | None = None
     """The authentication configuration for the server."""
@@ -378,6 +389,9 @@ class MCPServerSettings(BaseModel):
     experimental_session_advertise_version: int = 2
     """Reserved compatibility knob for session test capability advertisement."""
 
+    defer_loading: bool = False
+    """Provider-managed OpenAI Responses hint to defer remote tool loading."""
+
     @field_validator("experimental_session_advertise_version", mode="after")
     @classmethod
     def _validate_experimental_session_advertise_version(cls, value: int) -> int:
@@ -394,6 +408,15 @@ class MCPServerSettings(BaseModel):
         if value <= 0:
             raise ValueError("max_missed_pings must be greater than zero.")
         return value
+
+    @field_validator("access_token", mode="before")
+    @classmethod
+    def _normalize_access_token(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("access_token must be a string")
+        return normalize_access_token(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -431,12 +454,85 @@ class MCPServerSettings(BaseModel):
 
         return values
 
+    @model_validator(mode="after")
+    def _normalize_management_specific_settings(self) -> "MCPServerSettings":
+        if self.management == "provider":
+            invalid_fields: list[str] = []
+            if self.command is not None:
+                invalid_fields.append("command")
+            if self.args:
+                invalid_fields.append("args")
+            if self.env:
+                invalid_fields.append("env")
+            if self.cwd is not None:
+                invalid_fields.append("cwd")
+            if self.headers:
+                invalid_fields.append("headers")
+            if self.auth is not None:
+                invalid_fields.append("auth")
+            if self.roots:
+                invalid_fields.append("roots")
+            if not self.url:
+                invalid_fields.append("url")
+            if self.transport not in {"http", "sse"}:
+                invalid_fields.append("transport")
+            if invalid_fields:
+                invalid_list = ", ".join(sorted(invalid_fields))
+                raise ValueError(
+                    f"Provider-managed MCP servers have unsupported settings: {invalid_list}"
+                )
+            assert self.url is not None
+            self.url = normalize_provider_managed_url_server(
+                transport=self.transport,
+                url=self.url,
+            )
+            return self
+
+        if self.access_token is not None and not self.url:
+            raise ValueError("access_token requires a URL-based MCP server")
+
+        if self.url:
+            self.url, self.headers = normalize_client_managed_url_server(
+                transport=self.transport,
+                url=self.url,
+                headers=self.headers,
+                access_token=self.access_token,
+            )
+        return self
+
 
 class MCPSettings(BaseModel):
     """Configuration for all MCP servers."""
 
     servers: dict[str, MCPServerSettings] = {}
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+    @staticmethod
+    def _serialize_resolved_target_settings(
+        settings: MCPServerSettings,
+    ) -> dict[str, Any]:
+        """Serialize shorthand target settings back to an idempotent raw payload."""
+        payload = settings.model_dump(mode="python")
+
+        # resolve_target_entry() already normalizes access_token into Authorization
+        # for client-managed URL servers. Strip that synthesized header here so the
+        # final MCPServerSettings validation only applies the normalization once.
+        if settings.management != "provider" and settings.access_token is not None:
+            headers = payload.get("headers")
+            if isinstance(headers, dict):
+                expected_authorization = f"Bearer {settings.access_token}"
+                filtered_headers = {
+                    key: value
+                    for key, value in headers.items()
+                    if not (
+                        isinstance(key, str)
+                        and key.lower() == "authorization"
+                        and value == expected_authorization
+                    )
+                }
+                payload["headers"] = filtered_headers or None
+
+        return payload
 
     @classmethod
     def _normalize_target_list_entries(
@@ -479,7 +575,7 @@ class MCPSettings(BaseModel):
                 source_path=source_path,
             )
 
-            resolved_payload = resolved_settings.model_dump(mode="python")
+            resolved_payload = cls._serialize_resolved_target_settings(resolved_settings)
             existing_payload = normalized_targets.get(resolved_name)
             if existing_payload is not None and existing_payload != resolved_payload:
                 raise ValueError(
@@ -527,7 +623,9 @@ class MCPSettings(BaseModel):
                 overrides=overrides,
                 source_path=source_path,
             )
-            normalized_servers[server_key] = resolved_settings.model_dump(mode="python")
+            normalized_servers[server_key] = cls._serialize_resolved_target_settings(
+                resolved_settings
+            )
 
         return normalized_servers
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from fast_agent.context import get_current_context
@@ -42,34 +43,70 @@ async def save_session_history(ctx: "HookContext") -> None:
     if not ctx.message_history:
         return
 
-    manager = get_session_manager()
     history_agent = _SessionHistoryAgentProxy(
         agent=cast("AgentProtocol", ctx.agent),
         message_history=ctx.message_history,
     )
     acp_session_id = None
+    session_cwd: Path | None = None
+    session_store_scope = "workspace"
+    session_store_cwd: Path | None = None
     agent_context = getattr(ctx.agent, "context", None)
     acp_context = getattr(agent_context, "acp", None) if agent_context else None
     if acp_context is not None:
         acp_session_id = getattr(acp_context, "session_id", None)
+        raw_session_cwd = getattr(acp_context, "session_cwd", None)
+        if raw_session_cwd:
+            session_cwd = Path(str(raw_session_cwd)).expanduser().resolve()
+        raw_session_store_scope = getattr(acp_context, "session_store_scope", None)
+        if raw_session_store_scope in {"workspace", "app"}:
+            session_store_scope = str(raw_session_store_scope)
+        raw_session_store_cwd = getattr(acp_context, "session_store_cwd", None)
+        if raw_session_store_cwd:
+            session_store_cwd = Path(str(raw_session_store_cwd)).expanduser().resolve()
+
+    if session_store_scope == "app":
+        manager = get_session_manager()
+    else:
+        manager = (
+            get_session_manager(cwd=session_store_cwd)
+            if session_store_cwd is not None
+            else (
+                get_session_manager(cwd=session_cwd)
+                if session_cwd is not None
+                else get_session_manager()
+            )
+        )
     session = manager.current_session
-    if session is None:
-        metadata: dict[str, object] = {"agent_name": ctx.agent_name}
-        model_name = getattr(agent_config, "model", None) if agent_config else None
-        if model_name:
-            metadata["model"] = model_name
-        if acp_session_id:
-            manager.create_session_with_id(str(acp_session_id), metadata=metadata)
-        else:
-            manager.create_session(metadata=metadata)
+    metadata: dict[str, object] = {"agent_name": ctx.agent_name}
+    model_name = getattr(agent_config, "model", None) if agent_config else None
+    if model_name:
+        metadata["model"] = model_name
+    if session_cwd is not None:
+        metadata["cwd"] = str(session_cwd)
+
+    if acp_session_id:
+        expected_session_id = str(acp_session_id)
+        if session is None or session.info.name != expected_session_id:
+            existing_session = manager.get_session(expected_session_id)
+            if existing_session is not None:
+                manager.set_current_session(existing_session)
+                session = existing_session
+            else:
+                manager.create_session_with_id(expected_session_id, metadata=metadata)
+                session = manager.current_session
+    elif session is None:
+        manager.create_session(metadata=metadata)
         session = manager.current_session
-    elif acp_session_id:
-        session = manager.current_session
-        if (
-            session is not None
-            and session.info.metadata.get("acp_session_id") != acp_session_id
-        ):
+
+    if session is not None and acp_session_id:
+        if session.info.metadata.get("acp_session_id") != acp_session_id:
             session.info.metadata["acp_session_id"] = acp_session_id
+            session._save_metadata()
+    if session is not None and session_cwd is not None:
+        session_cwd_value = str(session_cwd)
+        if session.info.metadata.get("cwd") != session_cwd_value:
+            session.info.metadata["cwd"] = session_cwd_value
             session._save_metadata()
 
     previous_title = extract_session_title(session.info.metadata) if session else None
@@ -86,15 +123,17 @@ async def save_session_history(ctx: "HookContext") -> None:
     if acp_context is None or session is None:
         return
 
-    new_title = extract_session_title(session.info.metadata)
-    if not new_title or new_title == previous_title:
-        return
-
     try:
-        await acp_context.send_session_info_update(
-            title=new_title,
-            updated_at=session.info.last_activity.isoformat(),
-        )
+        new_title = extract_session_title(session.info.metadata)
+        if new_title != previous_title:
+            await acp_context.send_session_info_update(
+                title=new_title,
+                updated_at=session.info.last_activity.isoformat(),
+            )
+        else:
+            await acp_context.send_session_info_update(
+                updated_at=session.info.last_activity.isoformat(),
+            )
     except Exception as exc:
         logger.warning(
             "Failed to send ACP session info update",

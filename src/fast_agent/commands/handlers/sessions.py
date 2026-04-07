@@ -74,6 +74,15 @@ def _find_last_assistant_text(history: list[PromptMessageExtended]) -> str | Non
     return find_last_assistant_preview_text(history)
 
 
+def _strip_wrapping_quotes(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return text or None
+
+
 def _build_session_entries(entries: list[SessionEntrySummary], *, usage: str) -> Text:
     content = Text()
     content.append_text(Text("Sessions:", style="bold"))
@@ -134,9 +143,9 @@ async def handle_create_session(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
-    from fast_agent.session import get_session_manager
 
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
+    session_name = _strip_wrapping_quotes(session_name)
     session = manager.create_session(session_name)
     label = session.info.metadata.get("title") or session.info.name
     outcome.add_message(f"Created session: {label}", channel="info", right_info="session")
@@ -152,7 +161,10 @@ async def handle_list_sessions(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
-    summary = build_session_list_summary(show_help=show_help)
+    summary = build_session_list_summary(
+        manager=ctx.resolve_session_manager(),
+        show_help=show_help,
+    )
     if not summary.entries:
         outcome.add_message("No sessions found.", channel="warning", right_info="session")
         if show_help:
@@ -176,9 +188,9 @@ async def handle_pin_session(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
-    from fast_agent.session import get_session_manager, is_session_pinned
+    from fast_agent.session import is_session_pinned
 
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
     session = None
     if target:
         resolved = manager.resolve_session_name(target)
@@ -234,7 +246,7 @@ async def handle_clear_sessions(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
-    from fast_agent.session import apply_session_window, get_session_manager
+    from fast_agent.session import apply_session_window
 
     if not target:
         outcome.add_message(
@@ -244,7 +256,7 @@ async def handle_clear_sessions(
         )
         return outcome
 
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
     if target.lower() == "all":
         all_sessions = manager.list_sessions()
         if not all_sessions:
@@ -289,13 +301,12 @@ async def handle_resume_session(
     outcome = CommandOutcome()
     from fast_agent.session import (
         format_history_summary,
-        get_session_manager,
         summarize_session_histories,
     )
 
     agent_obj = ctx.agent_provider._agent(agent_name)
 
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
     agents_map = cast("Mapping[str, AgentProtocol]", ctx.agent_provider.registered_agents())
     if not isinstance(agents_map, Mapping):
         outcome.add_message(
@@ -411,13 +422,12 @@ async def handle_title_session(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
+    title = _strip_wrapping_quotes(title)
     if not title:
         outcome.add_message("Usage: /session title <text>", channel="error")
         return outcome
 
-    from fast_agent.session import get_session_manager
-
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
     session = manager.current_session
     if session_id:
         if session is None or session.info.name != session_id:
@@ -439,9 +449,8 @@ async def handle_fork_session(
         return _noenv_outcome()
 
     outcome = CommandOutcome()
-    from fast_agent.session import get_session_manager
-
-    manager = get_session_manager()
+    manager = ctx.resolve_session_manager()
+    title = _strip_wrapping_quotes(title)
     forked = manager.fork_current_session(title=title)
     if forked is None:
         outcome.add_message("No session available to fork.", channel="warning", right_info="session")

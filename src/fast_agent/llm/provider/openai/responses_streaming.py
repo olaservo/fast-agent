@@ -22,12 +22,20 @@ _logger = get_logger(__name__)
 _TOOL_START_EVENT_TYPES = {
     "response.web_search_call.in_progress",
     "response.web_search_call.searching",
+    "response.mcp_list_tools.in_progress",
+    "response.mcp_call.in_progress",
 }
 _TOOL_STOP_EVENT_TYPES = {
     "response.web_search_call.completed",
     "response.web_search_call.failed",
+    "response.mcp_list_tools.completed",
+    "response.mcp_list_tools.failed",
+    "response.mcp_call.completed",
+    "response.mcp_call.failed",
 }
 _WEB_SEARCH_PROGRESS_LABEL = "Searching the web"
+_MCP_LIST_TOOLS_PROGRESS_LABEL = "Loading MCP tools"
+_MCP_CALL_PROGRESS_LABEL = "Calling MCP tool"
 
 
 def _web_search_status_chunk(status: str) -> str:
@@ -47,6 +55,8 @@ def _item_is_responses_tool(item: Any) -> bool:
         "function_call",
         "custom_tool_call",
         "web_search_call",
+        "mcp_list_tools",
+        "mcp_call",
     }
 
 
@@ -54,6 +64,14 @@ def _responses_tool_name(item: Any) -> str:
     item_type = getattr(item, "type", None)
     if item_type == "web_search_call":
         return "web_search"
+    if item_type == "mcp_list_tools":
+        return "mcp_list_tools"
+    if item_type == "mcp_call":
+        tool_name = getattr(item, "name", None) or getattr(item, "tool_name", None)
+        server_label = getattr(item, "server_label", None)
+        if isinstance(server_label, str) and server_label and isinstance(tool_name, str) and tool_name:
+            return f"{server_label}/{tool_name}"
+        return tool_name or "mcp_call"
     return getattr(item, "name", None) or "tool"
 
 
@@ -64,6 +82,16 @@ def _responses_tool_use_id(item: Any, index: int | None, item_id: str | None = N
     suffix = str(index) if index is not None else "unknown"
     item_type = getattr(item, "type", None) or "tool"
     return f"{item_type}-{suffix}"
+
+
+def _tool_progress_display(item_type: str | None) -> tuple[str | None, str | None]:
+    if item_type == "web_search_call":
+        return _WEB_SEARCH_PROGRESS_LABEL, _web_search_status_chunk("in_progress")
+    if item_type == "mcp_list_tools":
+        return _MCP_LIST_TOOLS_PROGRESS_LABEL, "loading remote tool definitions..."
+    if item_type == "mcp_call":
+        return _MCP_CALL_PROGRESS_LABEL, "calling remote MCP tool..."
+    return None, None
 
 
 class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
@@ -167,9 +195,11 @@ class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
                         "tool_use_id": tool_info.tool_use_id,
                         "index": index,
                     }
-                    if item_type == "web_search_call":
-                        payload["tool_display_name"] = _WEB_SEARCH_PROGRESS_LABEL
-                        payload["chunk"] = _web_search_status_chunk("in_progress")
+                    display_name, display_chunk = _tool_progress_display(item_type)
+                    if display_name is not None:
+                        payload["tool_display_name"] = display_name
+                    if display_chunk is not None:
+                        payload["chunk"] = display_chunk
                     self._notify_tool_stream_listeners(
                         "start",
                         payload,
@@ -219,13 +249,32 @@ class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
                     if tool_state.is_completed(index=event_index, item_id=event_item_id):
                         continue
                     fallback_index = event_index if event_index is not None else -1
+                    fallback_prefix = (
+                        "web_search"
+                        if "web_search_call" in event_type
+                        else "mcp_list_tools"
+                        if "mcp_list_tools" in event_type
+                        else "mcp_call"
+                    )
                     tool_info = tool_state.register(
-                        tool_use_id=event_item_id or f"web_search-{fallback_index}",
-                        name="web_search",
+                        tool_use_id=event_item_id or f"{fallback_prefix}-{fallback_index}",
+                        name=(
+                            "web_search"
+                            if "web_search_call" in event_type
+                            else "mcp_list_tools"
+                            if "mcp_list_tools" in event_type
+                            else "mcp_call"
+                        ),
                         index=fallback_index,
                         item_id=event_item_id,
-                        item_type="web_search_call",
-                        kind="web_search",
+                        item_type=(
+                            "web_search_call"
+                            if "web_search_call" in event_type
+                            else "mcp_list_tools"
+                            if "mcp_list_tools" in event_type
+                            else "mcp_call"
+                        ),
+                        kind="web_search" if "web_search_call" in event_type else "tool",
                     )
 
                 index = tool_info.index if tool_info.index is not None else -1
@@ -240,6 +289,10 @@ class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
                 if tool_info.item_type == "web_search_call":
                     payload["tool_display_name"] = _WEB_SEARCH_PROGRESS_LABEL
                     payload["chunk"] = _web_search_status_chunk(str(status))
+                elif tool_info.item_type == "mcp_list_tools":
+                    payload["tool_display_name"] = _MCP_LIST_TOOLS_PROGRESS_LABEL
+                elif tool_info.item_type == "mcp_call":
+                    payload["tool_display_name"] = _MCP_CALL_PROGRESS_LABEL
                 self._notify_tool_stream_listeners("status", payload)
 
                 if event_type in _TOOL_START_EVENT_TYPES and not tool_info.start_notified:
@@ -342,11 +395,19 @@ class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
                 "function_call",
                 "custom_tool_call",
                 "web_search_call",
+                "mcp_list_tools",
+                "mcp_call",
             }:
                 continue
 
             if getattr(item, "type", None) == "web_search_call":
                 tool_name = "web_search"
+                tool_use_id = getattr(item, "id", None) or f"tool-{index}"
+            elif getattr(item, "type", None) == "mcp_list_tools":
+                tool_name = "mcp_list_tools"
+                tool_use_id = getattr(item, "id", None) or f"tool-{index}"
+            elif getattr(item, "type", None) == "mcp_call":
+                tool_name = getattr(item, "name", None) or "mcp_call"
                 tool_use_id = getattr(item, "id", None) or f"tool-{index}"
             else:
                 tool_name = getattr(item, "name", None) or "tool"

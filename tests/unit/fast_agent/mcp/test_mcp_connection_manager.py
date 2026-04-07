@@ -398,6 +398,110 @@ async def test_get_server_formats_stdio_missing_cwd_without_traceback(
     assert "Traceback" not in details
 
 
+@pytest.mark.asyncio
+async def test_get_server_stdio_timeout_includes_recent_stderr() -> None:
+    config = MCPServerSettings(
+        name="demo",
+        transport="stdio",
+        command="npx",
+        args=["-y", "@wonderwhy-er/desktop-commander@latest"],
+    )
+    manager = MCPConnectionManager(server_registry=cast("Any", _DummyStdioRegistry(config)))
+    server_conn = ServerConnection(
+        server_name="demo",
+        server_config=config,
+        transport_context_factory=lambda: cast("Any", object()),
+        client_session_factory=lambda *_args, **_kwargs: object(),
+    )
+    server_conn.record_stdio_stderr("npm notice downloading desktop-commander")
+    server_conn.record_stdio_stderr("npm warn request took longer than expected")
+
+    async def _fake_launch_server(*_args, **_kwargs):
+        manager.running_servers["demo"] = server_conn
+        return server_conn
+
+    manager.launch_server = _fake_launch_server  # type: ignore[method-assign]
+
+    with pytest.raises(ServerInitializationError) as exc_info:
+        await manager.get_server(
+            "demo",
+            client_session_factory=lambda *_args, **_kwargs: object(),
+            startup_timeout_seconds=0.01,
+        )
+
+    details = exc_info.value.details
+    assert "Try increasing --timeout or verify server/network startup." in details
+    assert "Recent stderr from stdio server:" in details
+    assert "npm notice downloading desktop-commander" in details
+    assert "npm warn request took longer than expected" in details
+
+
+@pytest.mark.asyncio
+async def test_connection_manager_exit_skips_grace_sleep_without_running_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeTaskGroup:
+        def __init__(self) -> None:
+            self.exited = False
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            self.exited = True
+
+    manager = MCPConnectionManager(server_registry=cast("Any", _DummyRegistry()))
+    fake_task_group = _FakeTaskGroup()
+    manager._task_group_active = True
+    manager._task_group = fake_task_group
+    manager._tg = fake_task_group
+
+    async def _fake_disconnect_all() -> bool:
+        return False
+
+    async def _unexpected_sleep(_delay: float) -> None:
+        raise AssertionError("shutdown grace sleep should be skipped")
+
+    manager.disconnect_all = _fake_disconnect_all  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "sleep", _unexpected_sleep)
+
+    await manager.__aexit__(None, None, None)
+
+    assert fake_task_group.exited is True
+
+
+@pytest.mark.asyncio
+async def test_connection_manager_exit_waits_briefly_after_requesting_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeTaskGroup:
+        def __init__(self) -> None:
+            self.exited = False
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            self.exited = True
+
+    manager = MCPConnectionManager(server_registry=cast("Any", _DummyRegistry()))
+    fake_task_group = _FakeTaskGroup()
+    manager._task_group_active = True
+    manager._task_group = fake_task_group
+    manager._tg = fake_task_group
+    sleep_calls: list[float] = []
+
+    async def _fake_disconnect_all() -> bool:
+        return True
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    manager.disconnect_all = _fake_disconnect_all  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    await manager.__aexit__(None, None, None)
+
+    assert sleep_calls == [0.5]
+    assert fake_task_group.exited is True
+
+
 def test_is_oauth_timeout_message_requires_real_timeout_markers() -> None:
     assert _is_oauth_timeout_message("OAuth authorization timed out") is True
     assert _is_oauth_timeout_message("OAuth authorization was not completed in time.") is True

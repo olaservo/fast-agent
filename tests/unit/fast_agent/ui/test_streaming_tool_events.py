@@ -1,10 +1,14 @@
 import json
 
-from fast_agent.ui.stream_segments import StreamSegmentAssembler
+from fast_agent.ui.stream_segments import StreamSegmentAssembler, extract_partial_json_string_field
 
 
-def _make_assembler() -> StreamSegmentAssembler:
-    return StreamSegmentAssembler(base_kind="markdown", tool_prefix="->")
+def _make_assembler(*, tool_metadata_resolver=None) -> StreamSegmentAssembler:
+    return StreamSegmentAssembler(
+        base_kind="markdown",
+        tool_prefix="->",
+        tool_metadata_resolver=tool_metadata_resolver,
+    )
 
 
 def test_tool_stream_delta_bootstraps_mode() -> None:
@@ -78,6 +82,70 @@ def test_tool_stream_status_uses_fallback_chunk_when_missing() -> None:
     assert "searching..." in text
 
 
+def test_tool_stream_replace_resets_snapshot_content() -> None:
+    assembler = _make_assembler()
+
+    assembler.handle_tool_event(
+        "start",
+        {
+            "tool_name": "huggingface_mcp/hf_whoami",
+            "tool_use_id": "mcp-1",
+            "chunk": "{}",
+        },
+    )
+    assembler.handle_tool_event(
+        "replace",
+        {
+            "tool_name": "huggingface_mcp/hf_whoami",
+            "tool_use_id": "mcp-1",
+            "chunk": "{}",
+        },
+    )
+    assembler.handle_tool_event(
+        "stop",
+        {"tool_name": "huggingface_mcp/hf_whoami", "tool_use_id": "mcp-1"},
+    )
+
+    text = "".join(segment.text for segment in assembler.segments)
+    assert "{}{}" not in text
+    assert text.count("{}") == 1
+
+
+def test_tool_stream_remote_labels_are_explicit() -> None:
+    assembler = _make_assembler()
+
+    assembler.handle_tool_event(
+        "start",
+        {
+            "tool_name": "huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool call: huggingface_mcp/hf_whoami",
+            "tool_use_id": "mcp-1",
+            "chunk": "{}",
+        },
+    )
+    assembler.handle_tool_event(
+        "replace",
+        {
+            "tool_name": "huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool result: huggingface_mcp/hf_whoami",
+            "tool_use_id": "mcp-1:result",
+            "chunk": "evalstate",
+        },
+    )
+    assembler.handle_tool_event(
+        "stop",
+        {
+            "tool_name": "huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool result: huggingface_mcp/hf_whoami",
+            "tool_use_id": "mcp-1:result",
+        },
+    )
+
+    text = "\n".join(segment.text for segment in assembler.segments)
+    assert "remote tool call: huggingface_mcp/hf_whoami" in text
+    assert "remote tool result: huggingface_mcp/hf_whoami" in text
+
+
 def test_tool_stream_apply_patch_preview_keeps_other_args() -> None:
     assembler = _make_assembler()
     command = (
@@ -128,3 +196,202 @@ def test_tool_stream_apply_patch_preview_supports_shell_aliases() -> None:
     text = "".join(segment.text for segment in assembler.segments)
     assert "apply_patch preview:" in text
     assert "*** Delete File: a.txt" in text
+
+
+def test_extract_partial_json_string_field_decodes_incomplete_code_value() -> None:
+    extracted = extract_partial_json_string_field(
+        '{"query":"count","code":"resp = await hf_trending()\\nprin',
+        field_name="code",
+    )
+
+    assert extracted is not None
+    assert extracted.key == "code"
+    assert extracted.value == "resp = await hf_trending()\nprin"
+    assert extracted.complete is False
+
+
+def test_tool_stream_code_preview_tracks_partial_code() -> None:
+    metadata = {
+        "variant": "code",
+        "code_arg": "code",
+        "language": "python",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: metadata if tool_name == "hf_hub_query_raw" else None
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "hf_hub_query_raw",
+            "tool_use_id": "tool-code-1",
+            "chunk": '{"query":"count","code":"resp = await hf_trending()\\nprin',
+        },
+    )
+
+    assert len(assembler.segments) == 1
+    preview = assembler.segments[0].code_preview
+    assert preview is not None
+    assert preview.language == "python"
+    assert preview.code == "resp = await hf_trending()\nprin"
+    assert preview.complete is False
+
+
+def test_tool_stream_shell_preview_tracks_partial_command() -> None:
+    metadata = {
+        "variant": "shell",
+        "shell_name": "bash",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: metadata if tool_name == "execute" else None
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "execute",
+            "tool_use_id": "tool-shell-1",
+            "chunk": '{"command":"uv run scripts/lint.py && uv run scr',
+        },
+    )
+
+    assert len(assembler.segments) == 1
+    preview = assembler.segments[0].code_preview
+    assert preview is not None
+    assert preview.language == "bash"
+    assert preview.code == "uv run scripts/lint.py && uv run scr"
+    assert preview.complete is False
+
+
+def test_tool_stream_shell_preview_skips_apply_patch_commands() -> None:
+    metadata = {
+        "variant": "shell",
+        "shell_name": "bash",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: metadata if tool_name == "execute" else None
+    )
+    command = (
+        "apply_patch <<'PATCH'\n"
+        "*** Begin Patch\n"
+        "*** Add File: a.txt\n"
+        "+hello\n"
+        "*** End Patch\n"
+        "PATCH"
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "execute",
+            "tool_use_id": "tool-shell-2",
+            "chunk": json.dumps({"command": command}),
+        },
+    )
+    assembler.handle_tool_event("stop", {"tool_name": "execute", "tool_use_id": "tool-shell-2"})
+
+    assert assembler.segments[0].code_preview is None
+    assert "apply_patch preview:" in assembler.segments[0].text
+
+
+def test_tool_stream_apply_patch_preview_appears_before_stop() -> None:
+    metadata = {
+        "variant": "shell",
+        "shell_name": "bash",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: metadata if tool_name == "execute" else None
+    )
+    command = (
+        "apply_patch <<'PATCH'\n"
+        "*** Begin Patch\n"
+        "*** Add File: a.txt\n"
+        "+hello\n"
+        "*** End Patch\n"
+        "PATCH"
+    )
+    partial_chunk = (
+        '{"command":"'
+        + command.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "execute",
+            "tool_use_id": "tool-shell-3",
+            "chunk": partial_chunk,
+        },
+    )
+
+    assert assembler.segments[0].code_preview is None
+    assert "apply_patch preview:" in assembler.segments[0].text
+    assert "*** Begin Patch" in assembler.segments[0].text
+
+
+def test_tool_stream_apply_patch_preview_colours_partial_patch_lines() -> None:
+    metadata = {
+        "variant": "shell",
+        "shell_name": "bash",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: metadata if tool_name == "execute" else None
+    )
+    command = (
+        "apply_patch <<'PATCH'\n"
+        "*** Begin Patch\n"
+        "*** Update File: a.txt\n"
+        "@@\n"
+        "-old\n"
+        "+new"
+    )
+    partial_chunk = (
+        '{"command":"'
+        + command.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "execute",
+            "tool_use_id": "tool-shell-4",
+            "chunk": partial_chunk,
+        },
+    )
+
+    segment = assembler.segments[0]
+    assert segment.code_preview is None
+    assert "apply_patch preview: streaming patch" in segment.text
+    assert "*** Update File: a.txt" in segment.text
+    assert "-old" in segment.text
+    assert "+new" in segment.text
+
+
+def test_tool_stream_code_preview_uses_namespaced_tool_metadata() -> None:
+    metadata = {
+        "variant": "code",
+        "code_arg": "code",
+        "language": "python",
+    }
+    assembler = _make_assembler(
+        tool_metadata_resolver=lambda tool_name: (
+            metadata if tool_name == "huggingface_mcp/hf_hub_query_raw" else None
+        )
+    )
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "huggingface_mcp/hf_hub_query_raw",
+            "tool_display_name": "remote tool call: huggingface_mcp/hf_hub_query_raw",
+            "tool_use_id": "tool-code-2",
+            "chunk": '{"query":"count","code":"resp = await hf_trending()\\nprin',
+        },
+    )
+
+    assert len(assembler.segments) == 1
+    preview = assembler.segments[0].code_preview
+    assert preview is not None
+    assert preview.language == "python"
+    assert preview.code == "resp = await hf_trending()\nprin"
+    assert preview.complete is False

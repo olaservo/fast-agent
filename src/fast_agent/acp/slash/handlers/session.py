@@ -63,7 +63,9 @@ def render_session_list(handler: "SlashCommandHandler") -> str:
                 "Session commands are disabled in --noenv mode.",
             ]
         )
-    summary = build_session_list_summary()
+    summary = build_session_list_summary(
+        manager=handler._build_command_context().resolve_session_manager()
+    )
     return render_session_list_markdown(summary, heading="sessions")
 
 

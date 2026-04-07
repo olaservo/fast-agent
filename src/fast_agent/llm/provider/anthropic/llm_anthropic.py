@@ -46,6 +46,7 @@ from fast_agent.core.exceptions import ProviderKeyError
 from fast_agent.core.logging.logger import get_logger
 from fast_agent.core.prompt import Prompt
 from fast_agent.event_progress import ProgressAction
+from fast_agent.history.tool_activities import tool_activity_display_title
 from fast_agent.interfaces import ModelT
 from fast_agent.llm.fastagent_llm import (
     FastAgentLLM,
@@ -53,6 +54,8 @@ from fast_agent.llm.fastagent_llm import (
 )
 from fast_agent.llm.provider.anthropic.beta_types import (
     InputJSONDelta,
+    MCPToolResultBlock,
+    MCPToolUseBlock,
     Message,
     MessageParam,
     RawContentBlockDeltaEvent,
@@ -99,6 +102,7 @@ from fast_agent.llm.structured_output_mode import StructuredOutputMode
 from fast_agent.llm.tool_tracking import ToolCallTracker
 from fast_agent.llm.usage_tracking import TurnUsage
 from fast_agent.mcp.mime_utils import DOCUMENT_MIME_TYPES, guess_mime_type, normalize_mime_type
+from fast_agent.mcp.provider_management import build_anthropic_provider_managed_mcp_payload
 from fast_agent.types import PromptMessageExtended
 from fast_agent.types.llm_stop_reason import LlmStopReason
 from fast_agent.utils.type_narrowing import is_str_object_dict
@@ -114,6 +118,7 @@ LONG_CONTEXT_BETA = "context-1m-2025-08-07"
 # Beta for fine-grained tool streaming - enables incremental tool input streaming
 # https://docs.anthropic.com/en/docs/build-with-claude/tool-use#streaming-tool-inputs
 FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
+MCP_CLIENT_BETA = "mcp-client-2025-11-20"
 
 # Stream capture mode - when enabled, saves all streaming chunks to files for debugging
 # Set FAST_AGENT_LLM_TRACE=1 (or any non-empty value) to enable
@@ -149,6 +154,67 @@ def _server_tool_preview_chunk(tool_input: object) -> str:
     if len(preview_chunk) > 120:
         return f"{preview_chunk[:117]}..."
     return preview_chunk
+
+
+def _mcp_tool_preview_chunk(tool_input: object) -> str:
+    if tool_input is None:
+        return "…"
+    try:
+        preview_chunk = json.dumps(tool_input)
+    except Exception:
+        return "…"
+    if len(preview_chunk) > 120:
+        return f"{preview_chunk[:117]}..."
+    return preview_chunk
+
+
+def _mcp_tool_result_preview_chunk(result_content: object) -> str:
+    if isinstance(result_content, Sequence) and not isinstance(result_content, (str, bytes)):
+        for item in result_content:
+            text_value = getattr(item, "text", None)
+            if isinstance(text_value, str) and text_value:
+                preview_chunk = text_value
+                break
+            if isinstance(item, Mapping):
+                item_map = {key: value for key, value in item.items() if isinstance(key, str)}
+                mapped_text = item_map.get("text")
+                if isinstance(mapped_text, str) and mapped_text:
+                    preview_chunk = mapped_text
+                    break
+        else:
+            try:
+                preview_chunk = json.dumps(result_content)
+            except Exception:
+                return "…"
+    else:
+        try:
+            preview_chunk = json.dumps(result_content)
+        except Exception:
+            return "…"
+
+    if len(preview_chunk) > 120:
+        return f"{preview_chunk[:117]}..."
+    return preview_chunk or "…"
+
+
+def _provider_tool_progress_label(*, tool_name: str, server_name: str | None = None) -> str:
+    if server_name:
+        return tool_activity_display_title(
+            kind="call",
+            tool_name=f"{server_name}/{tool_name}",
+            is_remote=True,
+        )
+    return web_tool_progress_label(tool_name)
+
+
+def _provider_tool_result_label(*, tool_name: str, server_name: str | None = None) -> str:
+    if server_name:
+        return tool_activity_display_title(
+            kind="result",
+            tool_name=f"{server_name}/{tool_name}",
+            is_remote=True,
+        )
+    return tool_activity_display_title(kind="result", tool_name=tool_name, is_remote=True)
 
 
 def _is_beta_text_block_validation_error(error: Exception) -> bool:
@@ -992,6 +1058,7 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
         estimated_tokens = 0
         tool_tracker = ToolCallTracker()
         tool_input_buffers: dict[str, _AnthropicToolInputBuffer] = {}
+        provider_tool_names: dict[str, tuple[str, str | None]] = {}
         thinking_segments: list[str] = []
         streamed_text_segments: list[str] = []
         thinking_indices: set[int] = set()
@@ -1042,7 +1109,7 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
                             index=event.index,
                             kind="server_tool",
                         )
-                        progress_label = web_tool_progress_label(state.name)
+                        progress_label = _provider_tool_progress_label(tool_name=state.name)
                         self._notify_tool_stream_listeners(
                             "start",
                             {
@@ -1063,6 +1130,81 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
                                 "tool_use_id": state.tool_use_id,
                                 "tool_event": "start",
                                 "details": progress_label,
+                            },
+                        )
+                        continue
+                    if isinstance(content_block, MCPToolUseBlock):
+                        combined_name = f"{content_block.server_name}/{content_block.name}"
+                        provider_tool_names[content_block.id] = (
+                            content_block.name,
+                            content_block.server_name,
+                        )
+                        state = tool_tracker.register(
+                            tool_use_id=content_block.id,
+                            name=combined_name,
+                            index=event.index,
+                            kind="server_tool",
+                        )
+                        progress_label = _provider_tool_progress_label(
+                            tool_name=content_block.name,
+                            server_name=content_block.server_name,
+                        )
+                        self._notify_tool_stream_listeners(
+                            "start",
+                            {
+                                "tool_name": combined_name,
+                                "server_name": content_block.server_name,
+                                "tool_display_name": progress_label,
+                                "chunk": _mcp_tool_preview_chunk(content_block.input),
+                                "tool_use_id": state.tool_use_id,
+                                "index": event.index,
+                            },
+                        )
+                        self.logger.info(
+                            "Anthropic MCP tool started",
+                            data={
+                                "progress_action": ProgressAction.CALLING_TOOL,
+                                "agent_name": self.name,
+                                "model": model,
+                                "tool_name": combined_name,
+                                "tool_use_id": state.tool_use_id,
+                                "tool_event": "start",
+                                "details": progress_label,
+                            },
+                        )
+                        continue
+                    if isinstance(content_block, MCPToolResultBlock):
+                        raw_tool_name, server_name = provider_tool_names.get(
+                            content_block.tool_use_id,
+                            ("mcp_tool", None),
+                        )
+                        combined_name = (
+                            f"{server_name}/{raw_tool_name}" if server_name else raw_tool_name
+                        )
+                        display_name = _provider_tool_result_label(
+                            tool_name=raw_tool_name,
+                            server_name=server_name,
+                        )
+                        result_tool_use_id = f"{content_block.tool_use_id}:result"
+                        self._notify_tool_stream_listeners(
+                            "replace",
+                            {
+                                "tool_name": combined_name,
+                                "server_name": server_name,
+                                "tool_display_name": display_name,
+                                "tool_use_id": result_tool_use_id,
+                                "index": event.index,
+                                "chunk": _mcp_tool_result_preview_chunk(content_block.content),
+                            },
+                        )
+                        self._notify_tool_stream_listeners(
+                            "stop",
+                            {
+                                "tool_name": combined_name,
+                                **({"server_name": server_name} if server_name else {}),
+                                "tool_display_name": display_name,
+                                "tool_use_id": result_tool_use_id,
+                                "index": event.index,
                             },
                         )
                         continue
@@ -1152,11 +1294,57 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
 
                     if state is not None and state.kind == "server_tool":
                         tool_tracker.close(index=event.index)
-                        progress_label = web_tool_progress_label(state.name)
+                        content_block = getattr(event, "content_block", None)
+                        server_name: str | None = None
+                        tool_name = state.name
+                        content_block_type = (
+                            content_block.get("type")
+                            if isinstance(content_block, Mapping)
+                            else getattr(content_block, "type", None)
+                        )
+                        if content_block_type == "mcp_tool_use":
+                            raw_server_name = (
+                                content_block.get("server_name")
+                                if isinstance(content_block, Mapping)
+                                else getattr(content_block, "server_name", None)
+                            )
+                            raw_tool_name = (
+                                content_block.get("name")
+                                if isinstance(content_block, Mapping)
+                                else getattr(content_block, "name", None)
+                            )
+                            raw_input = (
+                                content_block.get("input")
+                                if isinstance(content_block, Mapping)
+                                else getattr(content_block, "input", None)
+                            )
+                            if isinstance(raw_server_name, str) and isinstance(raw_tool_name, str):
+                                server_name = raw_server_name
+                                tool_name = f"{raw_server_name}/{raw_tool_name}"
+                            if raw_input is not None:
+                                input_preview = _mcp_tool_preview_chunk(raw_input)
+                                self._notify_tool_stream_listeners(
+                                    "replace",
+                                    {
+                                        "tool_name": tool_name,
+                                        "server_name": server_name,
+                                        "tool_use_id": state.tool_use_id,
+                                        "index": event.index,
+                                        "chunk": input_preview,
+                                    },
+                                )
+                        elif isinstance(content_block, ServerToolUseBlock):
+                            tool_name = content_block.name
+
+                        progress_label = _provider_tool_progress_label(
+                            tool_name=tool_name.split("/", 1)[-1],
+                            server_name=server_name,
+                        )
                         self._notify_tool_stream_listeners(
                             "stop",
                             {
-                                "tool_name": state.name,
+                                "tool_name": tool_name,
+                                **({"server_name": server_name} if server_name else {}),
                                 "tool_display_name": progress_label,
                                 "tool_use_id": state.tool_use_id,
                                 "index": event.index,
@@ -1168,7 +1356,7 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
                                 "progress_action": ProgressAction.CALLING_TOOL,
                                 "agent_name": self.name,
                                 "model": model,
-                                "tool_name": state.name,
+                                "tool_name": tool_name,
                                 "tool_use_id": state.tool_use_id,
                                 "tool_event": "stop",
                                 "details": progress_label,
@@ -1419,6 +1607,7 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
         thinking_enabled: bool,
         request_tools: list[ToolParam],
         web_tool_betas: Sequence[str],
+        provider_mcp_enabled: bool = False,
     ) -> list[str]:
         beta_flags: list[str] = []
         adaptive_thinking = self._supports_adaptive_thinking(model)
@@ -1437,6 +1626,8 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
             beta_flags.append(FINE_GRAINED_TOOL_STREAMING_BETA)
         if self.supports_direct_anthropic_beta("web_tools"):
             beta_flags.extend(web_tool_betas)
+        if provider_mcp_enabled:
+            beta_flags.append(MCP_CLIENT_BETA)
         return dedupe_preserve_order(beta_flags)
 
     def _apply_anthropic_cache_plan(
@@ -1751,6 +1942,11 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
         )
         web_tools, web_tool_betas = self._prepare_web_tools(model)
         request_tools = [*available_tools, *web_tools]
+        provider_mcp_servers, provider_mcp_tools = build_anthropic_provider_managed_mcp_payload(
+            self.provider_managed_mcp_state
+        )
+        if provider_mcp_tools:
+            request_tools.extend(cast("list[ToolParam]", provider_mcp_tools))
 
         base_args, thinking_enabled = self._build_anthropic_base_args(
             model=model,
@@ -1769,9 +1965,12 @@ class AnthropicLLM(FastAgentLLM[MessageParam, Message]):
             thinking_enabled=thinking_enabled,
             request_tools=request_tools,
             web_tool_betas=web_tool_betas,
+            provider_mcp_enabled=bool(provider_mcp_servers),
         )
         if beta_flags:
             base_args["betas"] = beta_flags
+        if provider_mcp_servers:
+            base_args["mcp_servers"] = provider_mcp_servers
 
         self._log_chat_progress(self.chat_turn(), model=model)
         # Use the base class method to prepare all arguments with Anthropic-specific exclusions

@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from fast_agent.mcp_server_registry import ServerRegistry
 
 logger = get_logger(__name__)
+STDIO_STDERR_BUFFER_LINES = 12
 
 
 class StreamingContextAdapter:
@@ -295,6 +296,7 @@ class ServerConnection:
         self._last_oauth_error: str | None = None
         self._last_oauth_authorization_url: str | None = None
         self._oauth_abort_event = threading.Event()
+        self._stdio_stderr_lines: deque[str] = deque(maxlen=STDIO_STDERR_BUFFER_LINES)
 
     def is_healthy(self) -> bool:
         """Check if the server connection is healthy and ready to use."""
@@ -304,6 +306,7 @@ class ServerConnection:
         """Reset the error state, allowing reconnection attempts."""
         self._error_occurred = False
         self._error_message = None
+        self._stdio_stderr_lines.clear()
 
     def request_shutdown(self) -> None:
         """
@@ -390,6 +393,14 @@ class ServerConnection:
             current_time = now if now is not None else time.monotonic()
             total += max(0.0, current_time - self._oauth_wait_started_at)
         return total
+
+    def record_stdio_stderr(self, line: str) -> None:
+        text = line.strip()
+        if text:
+            self._stdio_stderr_lines.append(text)
+
+    def recent_stdio_stderr_lines(self) -> tuple[str, ...]:
+        return tuple(self._stdio_stderr_lines)
 
     def record_ping_event(self, state: str) -> None:
         self._ping_history.append((datetime.now(timezone.utc), state))
@@ -543,6 +554,21 @@ def _format_stdio_startup_error(server_conn: ServerConnection, exc: OSError) -> 
         lines.append(f"cwd: {cwd}")
 
     return "\n".join(lines)
+
+
+def _append_stdio_stderr_details(server_conn: ServerConnection, details: str) -> str:
+    if server_conn.server_config.transport != "stdio":
+        return details
+
+    stderr_lines = server_conn.recent_stdio_stderr_lines()
+    if not stderr_lines:
+        return details
+
+    stderr_block = "\n".join(f"  {line}" for line in stderr_lines)
+    suffix = f"Recent stderr from stdio server:\n{stderr_block}"
+    if not details:
+        return suffix
+    return f"{details}\n\n{suffix}"
 
 
 def _is_stdio_startup_error(server_conn: ServerConnection, error_text: str) -> bool:
@@ -821,11 +847,12 @@ class MCPConnectionManager(ContextDependent):
         """Ensure clean shutdown of all connections before exiting."""
         try:
             # First request all servers to shutdown
-            await self.disconnect_all()
+            had_running_servers = await self.disconnect_all()
 
-            # Add a small delay to allow for clean shutdown
-            with suppress(asyncio.CancelledError):
-                await asyncio.sleep(0.5)
+            # Add a small delay only when live servers were asked to shut down.
+            if had_running_servers:
+                with suppress(asyncio.CancelledError):
+                    await asyncio.sleep(0.5)
 
             # Then close the task group if it's active
             if self._task_group_active:
@@ -1029,7 +1056,10 @@ class MCPConnectionManager(ContextDependent):
                     cwd=config.cwd,
                 )
                 # Create custom error handler to ensure all output is captured
-                error_handler = get_stderr_handler(server_name)
+                error_handler = get_stderr_handler(
+                    server_name,
+                    on_line=server_conn.record_stdio_stderr,
+                )
                 # Explicitly ensure we're using our custom logger for stderr
                 logger.debug(f"{server_name}: Creating stdio client with custom error handler")
 
@@ -1155,7 +1185,10 @@ class MCPConnectionManager(ContextDependent):
                     f"MCP Server: '{server_name}': {timeout_action} timed out after "
                     f"{startup_timeout_seconds:.1f}s (non-OAuth startup budget)"
                 ),
-                "Try increasing --timeout or verify server/network startup.",
+                _append_stdio_stderr_details(
+                    server_conn,
+                    "Try increasing --timeout or verify server/network startup.",
+                ),
             ) from exc
 
         return server_conn
@@ -1226,12 +1259,12 @@ class MCPConnectionManager(ContextDependent):
             if _is_stdio_startup_error(server_conn, formatted_error):
                 raise ServerInitializationError(
                     f"MCP Server: '{server_name}': Failed to start stdio server.",
-                    formatted_error,
+                    _append_stdio_stderr_details(server_conn, formatted_error),
                 )
 
             raise ServerInitializationError(
                 f"MCP Server: '{server_name}': Failed to initialize - see details. Check fastagent.config.yaml?",
-                formatted_error,
+                _append_stdio_stderr_details(server_conn, formatted_error),
             )
 
         return server_conn
@@ -1326,25 +1359,25 @@ class MCPConnectionManager(ContextDependent):
             if _is_stdio_startup_error(server_conn, formatted_error):
                 raise ServerInitializationError(
                     f"MCP Server: '{server_name}': Failed to start stdio server during reconnect.",
-                    formatted_error,
+                    _append_stdio_stderr_details(server_conn, formatted_error),
                 )
 
             raise ServerInitializationError(
                 f"MCP Server: '{server_name}': Failed to reconnect - see details.",
-                formatted_error,
+                _append_stdio_stderr_details(server_conn, formatted_error),
             )
 
         logger.info(f"{server_name}: Reconnection successful")
         return server_conn
 
-    async def disconnect_all(self) -> None:
+    async def disconnect_all(self) -> bool:
         """Disconnect all servers that are running under this connection manager."""
         # Get a copy of servers to shutdown
         servers_to_shutdown = []
 
         async with self._lock:
             if not self.running_servers:
-                return
+                return False
 
             # Make a copy of the servers to shut down
             servers_to_shutdown = list(self.running_servers.items())
@@ -1355,3 +1388,4 @@ class MCPConnectionManager(ContextDependent):
         for name, conn in servers_to_shutdown:
             logger.info(f"{name}: Requesting shutdown...")
             conn.request_shutdown()
+        return True

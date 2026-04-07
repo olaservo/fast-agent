@@ -50,6 +50,7 @@ from fast_agent.ui.command_payloads import (
     ShellCommand,
     is_command_payload,
 )
+from fast_agent.ui.console import configure_console_stream
 from fast_agent.ui.display_suppression import suppress_interactive_display
 from fast_agent.ui.enhanced_prompt import (
     get_enhanced_input,
@@ -972,6 +973,8 @@ class InteractivePrompt:
         Returns:
             The result of the interactive session
         """
+        configure_console_stream("stdout")
+
         agent_state = self._build_initial_agent_state(
             default_agent=default_agent,
             available_agents=available_agents,

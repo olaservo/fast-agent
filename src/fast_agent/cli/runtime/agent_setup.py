@@ -828,7 +828,7 @@ async def _run_single_agent_cli_flow(agent_app: Any, request: AgentRunRequest) -
 
 async def run_agent_request(request: AgentRunRequest) -> None:
     """Run the normalized CLI request."""
-    picker_model_source_override: str | None = None
+    startup_model_source_override: str | None = None
 
     if request.model is None:
         settings = _load_request_settings(request)
@@ -858,7 +858,14 @@ async def run_agent_request(request: AgentRunRequest) -> None:
                 settings=settings,
                 model_spec=request.model,
             )
-            picker_model_source_override = "model picker"
+            startup_model_source_override = "model picker"
+        elif explicit_source is None:
+            _, initial_model_spec = _resolve_model_picker_initial_selection(
+                settings=settings,
+            )
+            if initial_model_spec:
+                request.model = initial_model_spec
+                startup_model_source_override = "last used model"
 
     serve_permissions_enabled = request.permissions_enabled and not (
         request.noenv and request.mode == "serve"
@@ -902,8 +909,8 @@ async def run_agent_request(request: AgentRunRequest) -> None:
 
     if request.model:
         fast.args.model = request.model
-    if picker_model_source_override:
-        fast.args.model_source_override = picker_model_source_override
+    if startup_model_source_override:
+        fast.args.model_source_override = startup_model_source_override
     fast.args.noenv = request.noenv
     fast.args.reload = request.reload
     fast.args.watch = request.watch

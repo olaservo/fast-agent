@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import IO, TYPE_CHECKING, Any, Callable, Protocol, TextIO, cast
+from typing import IO, TYPE_CHECKING, Any, Callable, Mapping, Protocol, TextIO, cast
 
 from rich.console import Console, Group, RenderHook
 from rich.control import Control
@@ -14,6 +13,7 @@ from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.segment import ControlType, Segment
+from rich.syntax import Syntax
 from rich.text import Text
 
 from fast_agent.core.logging.logger import get_logger
@@ -21,6 +21,10 @@ from fast_agent.llm.stream_types import StreamChunk
 from fast_agent.ui import console
 from fast_agent.ui.apply_patch_preview import style_apply_patch_preview_text
 from fast_agent.ui.markdown_helpers import prepare_markdown_content
+from fast_agent.ui.markdown_renderables import (
+    build_markdown_renderable,
+    close_incomplete_code_blocks,
+)
 from fast_agent.ui.markdown_truncator import MarkdownTruncator
 from fast_agent.ui.plain_text_truncator import PlainTextTruncator
 from fast_agent.ui.stream_segments import StreamSegmentAssembler
@@ -37,7 +41,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 MARKDOWN_STREAM_TARGET_RATIO = 0.93
-MARKDOWN_STREAM_REFRESH_PER_SECOND = 8
+MARKDOWN_STREAM_REFRESH_PER_SECOND = 16
 MARKDOWN_STREAM_PRE_SCROLL_THROTTLE_RATIO = 0.7
 STREAM_RENDER_WIDTH_GUTTER = 1
 # Keep only a small anti-flicker pad now that scroll-indicator churn is debounced.
@@ -72,8 +76,6 @@ STREAM_PROGRESS_RESUME_DEBOUNCE_SECONDS = _resolve_progress_resume_debounce_seco
 def _alt_screen_streaming_enabled() -> bool:
     raw_value = os.getenv("FAST_AGENT_STREAM_ALT_SCREEN", "").strip().lower()
     return raw_value in {"1", "true", "yes", "on"}
-
-_FENCE_OPEN_LINE_RE = re.compile(r"^\s{0,3}(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
 
 
 @dataclass(frozen=True)
@@ -279,11 +281,7 @@ class _DiffLive(RenderHook):
         if first_diff == len(old_lines) and len(lines) > len(old_lines):
             self._write_appended_lines(lines[first_diff:])
             return
-        if (
-            old_lines
-            and len(lines) > len(old_lines)
-            and first_diff == len(old_lines) - 1
-        ):
+        if old_lines and len(lines) > len(old_lines) and first_diff == len(old_lines) - 1:
             self._rewrite_growing_last_line(old_lines[-1], lines[first_diff:])
             return
 
@@ -457,6 +455,7 @@ class StreamingMessageHandle:
         header_left: str = "",
         header_right: str = "",
         tool_header_name: str | None = None,
+        tool_metadata_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
         progress_display: Any = None,
         performance_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -479,6 +478,7 @@ class StreamingMessageHandle:
         self._segment_assembler = StreamSegmentAssembler(
             base_kind=base_kind,
             tool_prefix=self._tool_header_prefix_plain,
+            tool_metadata_resolver=tool_metadata_resolver,
         )
         self._markdown_truncator = MarkdownTruncator(target_height_ratio=1.0)
         self._plain_truncator = PlainTextTruncator(target_height_ratio=1.0)
@@ -661,50 +661,7 @@ class StreamingMessageHandle:
             self._live_started = True
 
     def _close_incomplete_code_blocks(self, text: str) -> str:
-        if "```" not in text and "~~~" not in text:
-            return text
-        in_fence = False
-        fence_char = "`"
-        fence_len = 3
-
-        for line in text.splitlines():
-            stripped = line.lstrip(" ")
-            if len(line) - len(stripped) > 3:
-                continue
-
-            if not in_fence:
-                opening = _FENCE_OPEN_LINE_RE.match(line)
-                if not opening:
-                    continue
-
-                delimiter = opening.group("delim")
-                info = opening.group("info")
-                # Backtick fences cannot include backticks in the info string.
-                if delimiter[0] == "`" and "`" in info:
-                    continue
-
-                in_fence = True
-                fence_char = delimiter[0]
-                fence_len = len(delimiter)
-                continue
-
-            if not stripped or stripped[0] != fence_char:
-                continue
-
-            index = 0
-            while index < len(stripped) and stripped[index] == fence_char:
-                index += 1
-
-            if index >= fence_len and stripped[index:].strip() == "":
-                in_fence = False
-
-        if not in_fence:
-            return text
-
-        closing_fence = fence_char * fence_len
-        if text.endswith("\n"):
-            return f"{text}{closing_fence}\n"
-        return f"{text}\n{closing_fence}\n"
+        return close_incomplete_code_blocks(text)
 
     def _set_scroll_indicator_visible(self, visible: bool) -> None:
         if self._scroll_indicator_visible == visible:
@@ -1024,20 +981,19 @@ class StreamingMessageHandle:
                     total_segments=total_segments,
                 )
                 if segment.kind == "markdown":
-                    prepared = prepare_markdown_content(segment.text, self._display._escape_xml)
-                    prepared_for_display = self._close_incomplete_code_blocks(prepared)
-                    if cursor_suffix:
-                        prepared_for_display += cursor_suffix
-                    if prepared_for_display:
-                        renderables.append(
-                            Markdown(prepared_for_display, code_theme=self._display.code_style)
+                    renderables.append(
+                        build_markdown_renderable(
+                            segment.text,
+                            code_theme=self._display.code_style,
+                            escape_xml=self._display._escape_xml,
+                            cursor_suffix=cursor_suffix,
+                            close_incomplete_fences=True,
                         )
-                    else:
-                        renderables.append(Text(""))
+                    )
                 elif segment.kind == "reasoning":
                     if self._render_reasoning_markdown:
                         prepared = prepare_markdown_content(segment.text, self._display._escape_xml)
-                        prepared_for_display = self._close_incomplete_code_blocks(prepared)
+                        prepared_for_display = close_incomplete_code_blocks(prepared)
                         if cursor_suffix:
                             prepared_for_display += cursor_suffix
                         markdown = Markdown(
@@ -1047,36 +1003,14 @@ class StreamingMessageHandle:
                         )
                         renderables.append(markdown)
                     else:
-                        renderables.append(Text(f"{segment.text}{cursor_suffix}", style="dim italic"))
+                        renderables.append(
+                            Text(f"{segment.text}{cursor_suffix}", style="dim italic")
+                        )
                 else:
                     if segment.kind == "tool":
-                        header_text = (
-                            self._tool_header_prefix.copy()
-                            if self._tool_header_prefix is not None
-                            else Text()
+                        renderables.append(
+                            self._render_tool_segment(segment, cursor_suffix=cursor_suffix)
                         )
-                        tool_name = segment.tool_name or "tool"
-                        if tool_name:
-                            if header_text.plain:
-                                header_text.append(" ")
-                            header_text.append(tool_name, style=self._tool_header_color or "")
-
-                        tool_text = header_text
-                        if segment.text:
-                            _, _, args_text = segment.text.partition("\n")
-                            if args_text:
-                                tool_text.append("\n")
-                                if "apply_patch preview:" in args_text:
-                                    tool_text.append_text(
-                                        style_apply_patch_preview_text(
-                                            args_text, default_style="white"
-                                        )
-                                    )
-                                else:
-                                    tool_text.append(args_text)
-                        if cursor_suffix:
-                            tool_text.append(cursor_suffix, style="dim")
-                        renderables.append(tool_text)
                     else:
                         renderables.append(Text(f"{segment.text}{cursor_suffix}"))
 
@@ -1187,15 +1121,56 @@ class StreamingMessageHandle:
 
         merged: list["StreamSegment"] = []
         for segment in segments:
-            if (
-                merged
-                and segment.kind == "markdown"
-                and merged[-1].kind == "markdown"
-            ):
+            if merged and segment.kind == "markdown" and merged[-1].kind == "markdown":
                 merged[-1] = merged[-1].copy_with_text(merged[-1].text + segment.text)
                 continue
             merged.append(segment)
         return merged
+
+    def _tool_header_text(self, segment: "StreamSegment") -> Text:
+        header_text = self._tool_header_prefix.copy() if self._tool_header_prefix is not None else Text()
+        tool_name = segment.tool_name or "tool"
+        if tool_name:
+            if header_text.plain:
+                header_text.append(" ")
+            header_text.append(tool_name, style=self._tool_header_color or "")
+        return header_text
+
+    def _render_tool_segment(
+        self,
+        segment: "StreamSegment",
+        *,
+        cursor_suffix: str,
+    ) -> "RenderableType":
+        preview = segment.code_preview
+        if preview is not None and preview.code.strip():
+            code_text = preview.code + cursor_suffix if cursor_suffix else preview.code
+            return Group(
+                self._tool_header_text(segment),
+                Syntax(
+                    code_text,
+                    preview.language,
+                    theme=self._display.code_style,
+                    line_numbers=False,
+                    word_wrap=False,
+                ),
+            )
+
+        header_text = self._tool_header_text(segment)
+        tool_text = header_text
+        if segment.text:
+            _, _, args_text = segment.text.partition("\n")
+            if args_text:
+                tool_text.append("\n")
+                if "apply_patch preview:" in args_text:
+                    tool_text.append_text(
+                        style_apply_patch_preview_text(args_text, default_style="white")
+                    )
+                else:
+                    tool_text.append(args_text)
+        if cursor_suffix:
+            tool_text.append(cursor_suffix, style="dim")
+        return tool_text
 
     async def _render_worker(self) -> None:
         assert self._queue is not None

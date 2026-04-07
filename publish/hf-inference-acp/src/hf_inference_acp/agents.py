@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from acp.helpers import text_block, tool_content
-from acp.schema import ToolCallProgress, ToolCallStart
+from acp.schema import (
+    ContentToolCallContent,
+    FileEditToolCallContent,
+    TerminalToolCallContent,
+    ToolCallProgress,
+    ToolCallStart,
+)
 
 from fast_agent.acp import ACPAwareMixin, ACPCommand
 from fast_agent.acp.acp_aware_mixin import ACPModeInfo
@@ -335,7 +341,7 @@ class SetupAgent(ACPAwareMixin, McpAgent):
             return f"Error: Invalid model `{model}` - {e}"
 
         # Validate model exists on HuggingFace and has providers
-        validation = await validate_hf_model(model, aliases=ModelFactory.get_runtime_presets())
+        validation = await validate_hf_model(model, presets=ModelFactory.get_runtime_presets())
         if not validation.valid:
             return validation.error or "Error: Model validation failed"
 
@@ -639,7 +645,14 @@ class HuggingFaceAgent(ACPAwareMixin, McpAgent):
             if not self.acp:
                 return
             try:
-                content = [tool_content(text_block(message))] if message else None
+                content: (
+                    list[
+                        ContentToolCallContent
+                        | FileEditToolCallContent
+                        | TerminalToolCallContent
+                    ]
+                    | None
+                ) = [tool_content(text_block(message))] if message else None
                 await self.acp.send_session_update(
                     ToolCallProgress(
                         tool_call_id=tool_call_id,
@@ -745,7 +758,7 @@ class HuggingFaceAgent(ACPAwareMixin, McpAgent):
             return f"Error: Invalid model `{model}` - {e}"
 
         # Validate model exists on HuggingFace and has providers
-        validation = await validate_hf_model(model, aliases=ModelFactory.get_runtime_presets())
+        validation = await validate_hf_model(model, presets=ModelFactory.get_runtime_presets())
         if not validation.valid:
             return validation.error or "Error: Model validation failed"
 

@@ -6,6 +6,7 @@ from fastmcp.tools import FunctionTool, ToolResult
 
 from fast_agent.agents.agent_types import ScopedFunctionToolConfig
 from fast_agent.mcp.helpers.content_helpers import get_text
+from fast_agent.tools.function_tool_config import FunctionToolSpec
 from fast_agent.tools.function_tool_loader import build_default_function_tool, load_function_tools
 
 
@@ -97,3 +98,29 @@ async def test_default_function_tool_preserves_explicit_structured_tool_result()
 
     assert get_text(result.content[0]) == '{"status":"ok"}'
     assert result.structured_content == {"status": "ok"}
+
+
+def test_loader_applies_metadata_for_structured_function_tool_spec(tmp_path) -> None:
+    module_path = tmp_path / "tools.py"
+    module_path.write_text(
+        "def run_query(code: str, limit: int = 1):\n    return code\n",
+        encoding="utf-8",
+    )
+
+    tool = load_function_tools(
+        [
+            FunctionToolSpec(
+                entrypoint="tools.py:run_query",
+                variant="code",
+                code_arg="code",
+                language="python",
+            )
+        ],
+        tmp_path,
+    )[0]
+
+    assert tool.meta == {
+        "variant": "code",
+        "code_arg": "code",
+        "language": "python",
+    }

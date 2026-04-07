@@ -85,6 +85,7 @@ class StatusSummary:
     client_info: ClientInfoSummary | None
     model_summary: AgentModelSummary | None
     parallel_summary: ParallelModelSummary | None
+    model_source: str | None
     conversation_stats: ConversationStatsSummary
     uptime_seconds: float
     error_report: ErrorHandlingSummary
@@ -429,6 +430,21 @@ def build_status_summary(
     uptime_seconds: float,
     instance: object | None,
 ) -> StatusSummary:
+    model_source = None
+    candidate_configs: list[object] = []
+    if agent is not None:
+        agent_context = getattr(agent, "context", None)
+        if agent_context is not None:
+            candidate_configs.append(getattr(agent_context, "config", None))
+    if instance and hasattr(instance, "app") and hasattr(instance.app, "context"):
+        candidate_configs.append(getattr(instance.app.context, "config", None))
+
+    for config in candidate_configs:
+        source = getattr(config, "model_source", None) if config is not None else None
+        if isinstance(source, str) and source.strip():
+            model_source = source.strip()
+            break
+
     client_summary = _collect_client_info(
         client_info=client_info,
         client_capabilities=client_capabilities,
@@ -455,6 +471,7 @@ def build_status_summary(
         client_info=client_summary,
         model_summary=model_summary,
         parallel_summary=parallel_summary,
+        model_source=model_source,
         conversation_stats=conversation_stats,
         uptime_seconds=uptime_seconds,
         error_report=error_report,

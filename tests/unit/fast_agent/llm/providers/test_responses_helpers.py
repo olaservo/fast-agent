@@ -48,6 +48,10 @@ from fast_agent.llm.provider.openai.responses_streaming import ResponsesStreamin
 from fast_agent.llm.provider_types import Provider
 from fast_agent.llm.request_params import RequestParams
 from fast_agent.mcp.prompt_message_extended import PromptMessageExtended
+from fast_agent.mcp.provider_management import (
+    ProviderManagedMCPAttachment,
+    ProviderManagedMCPState,
+)
 from fast_agent.tools.apply_patch_tool import build_apply_patch_tool
 from fast_agent.types import COMMENTARY_PHASE
 
@@ -1080,6 +1084,50 @@ def test_build_response_args_includes_openai_web_search_tool() -> None:
     assert RESPONSE_INCLUDE_WEB_SEARCH_SOURCES in include_payload
 
 
+def test_build_response_args_includes_provider_managed_mcp_tools() -> None:
+    llm = _build_responses_family_llm(Provider.RESPONSES, model_name="gpt-5.4")
+    llm.set_provider_managed_mcp_state(
+        ProviderManagedMCPState(
+            attachments=(
+                ProviderManagedMCPAttachment(
+                    server_name="stripe",
+                    server_description="Stripe official MCP",
+                    server_url="https://mcp.stripe.com",
+                    access_token="token-123",
+                    defer_loading=True,
+                ),
+            ),
+            tool_allowlists={"stripe": ("create_payment_link",)},
+        )
+    )
+
+    args = llm._build_response_args(
+        input_items=[
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "create a payment link"}],
+            }
+        ],
+        request_params=RequestParams(model="gpt-5.4"),
+        tools=None,
+    )
+
+    tools_payload = args.get("tools")
+    assert isinstance(tools_payload, list)
+    assert tools_payload == [
+        {
+            "type": "mcp",
+            "server_label": "stripe",
+            "server_description": "Stripe official MCP",
+            "server_url": "https://mcp.stripe.com",
+            "authorization": "token-123",
+            "allowed_tools": ["create_payment_link"],
+            "defer_loading": True,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("service_tier", "wire_value"),
     [("fast", "priority"), ("flex", "flex")],
@@ -1379,6 +1427,37 @@ def test_openresponses_web_search_uses_own_provider_settings() -> None:
     assert tools_payload[0]["type"] == "web_search"
 
 
+def test_openresponses_rejects_provider_managed_mcp_tools() -> None:
+    llm = _build_responses_family_llm(
+        Provider.OPENRESPONSES,
+        model_name="openai/gpt-oss-120b",
+    )
+    llm.set_provider_managed_mcp_state(
+        ProviderManagedMCPState(
+            attachments=(
+                ProviderManagedMCPAttachment(
+                    server_name="stripe",
+                    server_description="Stripe official MCP",
+                    server_url="https://mcp.stripe.com",
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(ModelConfigError, match="Provider-managed MCP is not supported"):
+        llm._build_response_args(
+            input_items=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
+            request_params=RequestParams(model="openai/gpt-oss-120b"),
+            tools=None,
+        )
+
+
 def test_codex_web_search_defaults_disabled() -> None:
     llm = _build_codex_responses_llm_with_web_search()
 
@@ -1489,6 +1568,55 @@ def test_extract_web_search_metadata_captures_tool_and_citations() -> None:
         if isinstance(citation, TextContent)
     }
     assert "https://openai.com/blog" in citation_urls
+
+
+def test_extract_provider_mcp_metadata_captures_remote_activity() -> None:
+    harness = _OutputHarness()
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="mcp_list_tools",
+                id="mcp_list_123",
+                server_label="stripe",
+                status="completed",
+            ),
+            SimpleNamespace(
+                type="mcp_call",
+                id="mcp_call_123",
+                server_label="stripe",
+                name="create_payment_link",
+                status="completed",
+                arguments='{"amount": 42, "currency": "usd"}',
+            ),
+        ]
+    )
+
+    payloads = harness._extract_provider_mcp_metadata(response)
+
+    assert len(payloads) == 2
+    assert isinstance(payloads[0], TextContent)
+    list_payload = json.loads(payloads[0].text)
+    assert list_payload["type"] == "mcp_tool_use"
+    assert list_payload["provider_tool_type"] == "mcp_list_tools"
+    assert list_payload["server_name"] == "stripe"
+
+    assert isinstance(payloads[1], TextContent)
+    call_payload = json.loads(payloads[1].text)
+    assert call_payload["type"] == "mcp_tool_use"
+    assert call_payload["provider_tool_type"] == "mcp_call"
+    assert call_payload["name"] == "create_payment_link"
+    assert call_payload["server_name"] == "stripe"
+    assert call_payload["input"] == {"amount": 42, "currency": "usd"}
+
+
+def test_extract_provider_mcp_metadata_rejects_approval_requests() -> None:
+    harness = _OutputHarness()
+    response = SimpleNamespace(
+        output=[SimpleNamespace(type="mcp_approval_request", id="approval_123")]
+    )
+
+    with pytest.raises(RuntimeError, match="approval requests are not supported"):
+        harness._extract_provider_mcp_metadata(response)
 
 
 def test_tool_fallback_notifications_support_web_search_call() -> None:

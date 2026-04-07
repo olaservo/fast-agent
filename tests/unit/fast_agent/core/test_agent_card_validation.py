@@ -169,6 +169,27 @@ def test_scan_agent_cards_rejects_mcp_connect_url_with_embedded_auth_flag(tmp_pa
     assert any("--auth" in err for err in results[0].errors)
 
 
+def test_scan_agent_cards_reports_invalid_provider_mcp_connect_settings(tmp_path: Path) -> None:
+    card_path = tmp_path / "agent.yaml"
+    card_path.write_text(
+        "\n".join(
+            [
+                "name: mcp_agent",
+                "mcp_connect:",
+                "  - target: https://mcp.stripe.com",
+                "    management: provider",
+                "    headers:",
+                "      Authorization: Bearer token",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    results = scan_agent_card_directory(tmp_path)
+    assert len(results) == 1
+    assert any("unsupported settings" in err for err in results[0].errors)
+
+
 def test_scan_agent_cards_reports_missing_shell_cwd(tmp_path: Path) -> None:
     missing_cwd = tmp_path / "missing-shell-cwd"
     card_path = tmp_path / "agent.yaml"

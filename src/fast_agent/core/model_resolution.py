@@ -10,7 +10,7 @@ from typing import Any
 from fast_agent.core.exceptions import ModelConfigError
 from fast_agent.core.logging.logger import get_logger
 
-HARDCODED_DEFAULT_MODEL = "gpt-5-mini?reasoning=low"
+HARDCODED_DEFAULT_MODEL = "gpt-5.4-mini?reasoning=low"
 _MODEL_REFERENCE_PATTERN = re.compile(
     r"^\$(?P<namespace>[A-Za-z_][A-Za-z0-9_-]*)\.(?P<key>[A-Za-z_][A-Za-z0-9_-]*)$"
 )

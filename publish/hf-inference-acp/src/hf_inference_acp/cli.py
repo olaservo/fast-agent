@@ -341,14 +341,15 @@ async def run_agents(
         if merged_card_tools:
             extra_agent_names |= collect_agent_card_names(merged_card_tools)
 
+        loaded_agents = cast("dict[str, dict[str, Any]]", fast.agents)
         issues, invalid_names = find_loaded_agent_issues(
-            fast.agents,
+            loaded_agents,
             extra_agent_names=extra_agent_names,
             server_names=server_names,
         )
         if invalid_names:
             for name in invalid_names:
-                fast.agents.pop(name, None)
+                loaded_agents.pop(name, None)
                 for mapping_name in ("_agent_card_sources", "_agent_card_histories"):
                     mapping = getattr(fast, mapping_name, None)
                     if isinstance(mapping, dict):
@@ -500,7 +501,7 @@ def run_acp(
         help="Enable a local shell runtime and expose the execute tool (bash or pwsh).",
     ),
     instance_scope: serve.InstanceScope = typer.Option(
-        serve.InstanceScope.SHARED,
+        serve.InstanceScope.CONNECTION,
         "--instance-scope",
         help="Control how ACP clients receive isolated agent instances (shared, connection, request)",
     ),
@@ -526,7 +527,7 @@ def run_acp(
 
     instruction_override = None
     if instruction:
-        instruction_override, _ = resolve_instruction_option(instruction)
+        instruction_override, _ = resolve_instruction_option(instruction, model, "serve")
 
     server_list = servers.split(",") if servers else None
 

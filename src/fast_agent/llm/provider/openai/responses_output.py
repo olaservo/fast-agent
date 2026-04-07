@@ -429,3 +429,52 @@ class ResponsesOutputMixin:
                         append_citation(payload)
 
         return web_tool_payloads, citation_payloads
+
+    @staticmethod
+    def _normalize_provider_mcp_output_item(output_item: Any) -> dict[str, Any] | None:
+        item_type = getattr(output_item, "type", None)
+        if item_type not in {"mcp_list_tools", "mcp_call"}:
+            return None
+
+        payload: dict[str, Any] = {
+            "type": "mcp_tool_use",
+            "provider_tool_type": item_type,
+            "name": getattr(output_item, "name", None)
+            or getattr(output_item, "tool_name", None)
+            or item_type,
+        }
+        item_id = getattr(output_item, "id", None)
+        if isinstance(item_id, str) and item_id:
+            payload["id"] = item_id
+        status = getattr(output_item, "status", None)
+        if isinstance(status, str) and status:
+            payload["status"] = status
+        server_label = getattr(output_item, "server_label", None)
+        if isinstance(server_label, str) and server_label:
+            payload["server_name"] = server_label
+        arguments = getattr(output_item, "arguments", None)
+        if isinstance(arguments, str) and arguments:
+            payload["arguments"] = arguments
+            try:
+                parsed_arguments = from_json(arguments, allow_partial=True)
+            except Exception:
+                parsed_arguments = None
+            if isinstance(parsed_arguments, Mapping):
+                payload["input"] = dict(parsed_arguments)
+        return payload
+
+    def _extract_provider_mcp_metadata(
+        self,
+        response: Any,
+    ) -> list[ContentBlock]:
+        payloads: list[ContentBlock] = []
+        for output_item in getattr(response, "output", []) or []:
+            item_type = getattr(output_item, "type", None)
+            if item_type == "mcp_approval_request":
+                raise RuntimeError(
+                    "OpenAI MCP approval requests are not supported by fast-agent yet."
+                )
+            payload = self._normalize_provider_mcp_output_item(output_item)
+            if payload is not None:
+                payloads.append(TextContent(type="text", text=json.dumps(payload)))
+        return payloads

@@ -112,7 +112,7 @@ def _build_url_target_flag_error(*, source_path: str, flag: str) -> str:
     if flag == "--auth":
         return (
             f"`{source_path}` must be a pure target string. "
-            "Move --auth to `headers` or `auth` settings."
+            "Move --auth to `access_token`, `headers`, or `auth` settings."
         )
     return (
         f"`{source_path}` must be a pure target string. "
@@ -481,17 +481,20 @@ def build_server_config_from_target(
         url_value = effective_target.url
         if not url_value:
             raise ValueError("Connection target is required")
-        parsed_urls = parse_server_urls(url_value, auth_token=auth_token)
-        if len(parsed_urls) != 1:
-            raise ValueError("Singular MCP connect targets do not support multiple URLs")
-        _generated_name, transport, parsed_url, headers = parsed_urls[0]
+        management = None
+        if overrides is not None:
+            raw_management = overrides.get("management")
+            if isinstance(raw_management, str):
+                management = raw_management.strip().lower()
+        _generated_name, transport, parsed_url = parse_server_url(url_value)
         payload.update(
             {
                 "transport": transport,
-                "url": parsed_url,
-                "headers": headers,
+                "url": url_value if management == "provider" else parsed_url,
             }
         )
+        if auth_token is not None:
+            payload["access_token"] = auth_token
     else:
         if not effective_target.command:
             raise ValueError("Connection target is required")
@@ -530,7 +533,6 @@ def resolve_target_entry(
         reconnect_on_disconnect=cast("bool | None", overrides.get("reconnect_on_disconnect")),
         source_path=source_path,
     )
-
     resolved_name, resolved_settings = build_server_config_from_target(
         normalized_target,
         auth_token=None,

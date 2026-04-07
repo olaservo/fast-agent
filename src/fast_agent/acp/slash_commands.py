@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import time
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Awaitable,
@@ -509,12 +510,29 @@ class SlashCommandHandler:
         provider = getattr(self.instance, "app", None)
         if provider is None:
             provider = StaticAgentProvider(self.instance.agents)
+        raw_session_cwd = getattr(self._acp_context, "session_cwd", None)
+        raw_session_store_cwd = getattr(self._acp_context, "session_store_cwd", None)
         return CommandContext(
             agent_provider=cast("AgentProvider", provider),
             current_agent_name=self.current_agent_name,
             io=ACPCommandIO(),
             settings=settings,
             noenv=self._noenv,
+            session_cwd=(
+                Path(str(raw_session_cwd)).expanduser().resolve()
+                if raw_session_cwd
+                else None
+            ),
+            session_store_scope=getattr(
+                self._acp_context,
+                "session_store_scope",
+                "workspace",
+            ),
+            session_store_cwd=(
+                Path(str(raw_session_store_cwd)).expanduser().resolve()
+                if raw_session_store_cwd
+                else None
+            ),
         )
 
     def _format_outcome_as_markdown(
@@ -538,8 +556,26 @@ class SlashCommandHandler:
             return
         from fast_agent.session import extract_session_title, get_session_manager
 
-        manager = get_session_manager()
+        raw_session_store_scope = getattr(
+            self._acp_context,
+            "session_store_scope",
+            "workspace",
+        )
+        raw_session_store_cwd = getattr(self._acp_context, "session_store_cwd", None)
+        raw_session_cwd = getattr(self._acp_context, "session_cwd", None)
+        if raw_session_store_scope == "app":
+            manager = get_session_manager()
+        elif raw_session_store_cwd:
+            manager = get_session_manager(
+                cwd=Path(str(raw_session_store_cwd)).expanduser().resolve()
+            )
+        elif raw_session_cwd:
+            manager = get_session_manager(cwd=Path(str(raw_session_cwd)).expanduser().resolve())
+        else:
+            manager = get_session_manager()
         session = manager.current_session
+        if session is None or session.info.name != self.session_id:
+            session = manager.get_session(self.session_id)
         if session is None:
             return
 

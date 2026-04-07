@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
 import pytest
 
 from fast_agent.commands.context import CommandContext
 from fast_agent.commands.handlers import sessions as session_handlers
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class _StubIO:
@@ -73,6 +79,15 @@ def _build_noenv_context() -> CommandContext:
     )
 
 
+def _build_context(*, session_cwd: Path | None = None) -> CommandContext:
+    return CommandContext(
+        agent_provider=_StubAgentProvider(),
+        current_agent_name="agent",
+        io=_StubIO(),
+        session_cwd=session_cwd,
+    )
+
+
 @pytest.mark.asyncio
 async def test_noenv_list_sessions_returns_disabled_message() -> None:
     outcome = await session_handlers.handle_list_sessions(
@@ -96,3 +111,48 @@ async def test_noenv_resume_session_returns_disabled_message() -> None:
     assert outcome.messages
     assert str(outcome.messages[0].text) == session_handlers.NOENV_SESSION_MESSAGE
     assert outcome.messages[0].channel == "warning"
+
+
+def test_strip_wrapping_quotes_removes_matching_outer_quotes() -> None:
+    assert session_handlers._strip_wrapping_quotes('"quoted title"') == "quoted title"
+    assert session_handlers._strip_wrapping_quotes("'quoted title'") == "quoted title"
+
+
+def test_strip_wrapping_quotes_preserves_unmatched_quotes() -> None:
+    assert session_handlers._strip_wrapping_quotes('"quoted title') == '"quoted title'
+    assert session_handlers._strip_wrapping_quotes("plain title") == "plain title"
+
+
+@pytest.mark.asyncio
+async def test_create_session_uses_context_session_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager_calls: list[Path | None] = []
+
+    class _Manager:
+        def create_session(self, name: str | None = None):
+            del name
+            return SimpleNamespace(info=SimpleNamespace(metadata={}, name="s-1"))
+
+    def fake_get_session_manager(
+        *,
+        cwd: Path | None = None,
+        environment_override=None,
+        respect_env_override: bool = True,
+    ):
+        del environment_override, respect_env_override
+        manager_calls.append(cwd)
+        return _Manager()
+
+    monkeypatch.setattr("fast_agent.session.get_session_manager", fake_get_session_manager)
+
+    outcome = await session_handlers.handle_create_session(
+        _build_context(session_cwd=workspace.resolve()),
+        session_name="Title",
+    )
+
+    assert outcome.messages
+    assert manager_calls == [workspace.resolve()]

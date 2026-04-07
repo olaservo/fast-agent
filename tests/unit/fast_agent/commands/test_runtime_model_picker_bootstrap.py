@@ -698,3 +698,56 @@ async def test_run_agent_request_persists_and_reloads_last_used_for_shell_mode(
         "openai",
         "gpt-4.1-mini",
     )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_request_uses_last_used_for_noninteractive_startup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import fast_agent
+    from fast_agent import config as config_module
+
+    workspace = tmp_path / "workspace"
+    env_dir = workspace / ".cdx"
+    env_dir.mkdir(parents=True)
+    (env_dir / "fastagent.config.yaml").write_text(
+        "default_model: null\n"
+        "model_references:\n"
+        "  system:\n"
+        "    last_used: claude-haiku-4-5\n",
+        encoding="utf-8",
+    )
+
+    request = _make_request()
+    request.mode = "serve"
+    request.transport = "acp"
+    request.environment_dir = env_dir
+
+    class _AbortFastAgent:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+            raise RuntimeError("stop-after-model-resolution")
+
+    old_settings = config_module._settings
+    previous_cwd = Path.cwd()
+    previous_env_dir = os.environ.get("ENVIRONMENT_DIR")
+    try:
+        config_module._settings = None
+        os.chdir(workspace)
+        os.environ["ENVIRONMENT_DIR"] = str(env_dir)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        monkeypatch.setattr(fast_agent, "FastAgent", _AbortFastAgent)
+
+        with pytest.raises(RuntimeError, match="stop-after-model-resolution"):
+            await run_agent_request(request)
+    finally:
+        os.chdir(previous_cwd)
+        if previous_env_dir is None:
+            os.environ.pop("ENVIRONMENT_DIR", None)
+        else:
+            os.environ["ENVIRONMENT_DIR"] = previous_env_dir
+        config_module._settings = old_settings
+
+    assert request.model == "claude-haiku-4-5"
