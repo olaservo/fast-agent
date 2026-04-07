@@ -198,7 +198,14 @@ class ConversationSummary(BaseModel):
         for msg in self.messages:
             for activity in tool_activities_for_message(msg, tool_name_lookup=tool_id_to_name):
                 if activity.kind == "result" and activity.is_error:
-                    error_names.append(tool_id_to_name.get(activity.tool_use_id, activity.tool_name))
+                    tool_name = tool_id_to_name.get(activity.tool_use_id)
+                    if tool_name is None:
+                        tool_name = (
+                            "unknown"
+                            if activity.tool_name == activity.tool_use_id
+                            else activity.tool_name
+                        )
+                    error_names.append(tool_name)
 
         return dict(Counter(error_names))
 

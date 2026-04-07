@@ -230,6 +230,26 @@ def test_complete_history_files_includes_directories():
             os.chdir(original_cwd)
 
 
+def test_configured_mcp_server_target_uses_provider_base_url_only_for_provider_servers() -> None:
+    completer = AgentCompleter(agents=["agent1"])
+
+    provider_target = completer._configured_mcp_server_target(
+        {
+            "management": "provider",
+            "url": "https://example.com/api/mcp",
+        }
+    )
+    client_target = completer._configured_mcp_server_target(
+        {
+            "management": "client",
+            "url": "https://example.com/api/mcp",
+        }
+    )
+
+    assert provider_target == "https://example.com/api"
+    assert client_target == "https://example.com/api/mcp"
+
+
 def test_complete_history_files_filters_by_prefix():
     """Test that completions are filtered by prefix."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -993,7 +1013,7 @@ def test_get_completions_for_mcp_connect_configured_url_server_shows_url(monkeyp
     docs_completion = next((c for c in completions if c.text == "docs"), None)
 
     assert docs_completion is not None
-    assert docs_completion.display_meta_text == "https://example.test/mcp/docs"
+    assert docs_completion.display_meta_text == "https://example.test/mcp/docs/mcp"
 
 
 def test_get_completions_for_mcp_connect_shows_target_hint_first(monkeypatch) -> None:

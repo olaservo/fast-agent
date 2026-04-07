@@ -9,6 +9,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Iterable,
     Mapping,
     TypeVar,
     Union,
@@ -232,6 +233,17 @@ class MCPAggregator(ContextDependent):
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
+    @staticmethod
+    def _unique_preserving_order(items: Iterable[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            result.append(item)
+        return result
+
     async def __aenter__(self):
         if self.initialized:
             return self
@@ -290,6 +302,7 @@ class MCPAggregator(ContextDependent):
         self._configured_server_names = list(server_names)
         self.server_names = list(server_names)
         self._attached_server_names: list[str] = []
+        self._supplemental_attached_server_names: list[str] = []
         self.connection_persistence = connection_persistence
         self.agent_name = name
         self.config = config  # Store the config for access in session factory
@@ -822,7 +835,12 @@ class MCPAggregator(ContextDependent):
         )
 
     def list_attached_servers(self) -> list[str]:
-        return list(self._attached_server_names)
+        return self._unique_preserving_order(
+            [*self._attached_server_names, *self._supplemental_attached_server_names]
+        )
+
+    def set_supplemental_attached_servers(self, server_names: Iterable[str]) -> None:
+        self._supplemental_attached_server_names = self._unique_preserving_order(server_names)
 
     def list_configured_detached_servers(self) -> list[str]:
         configured = set(self._configured_server_names)
@@ -830,7 +848,7 @@ class MCPAggregator(ContextDependent):
         registry_data = getattr(server_registry, "registry", None)
         if isinstance(registry_data, dict):
             configured.update(registry_data.keys())
-        return sorted(configured - set(self._attached_server_names))
+        return sorted(configured - set(self.list_attached_servers()))
 
     async def _initialize_skybridge_configs(self, server_names: list[str] | None = None) -> None:
         """Discover Skybridge resources across servers."""

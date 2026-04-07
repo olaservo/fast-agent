@@ -8,6 +8,7 @@ from fast_agent.mcp.provider_management import (
     build_anthropic_provider_managed_mcp_payload,
     build_openai_provider_managed_mcp_tools,
     build_provider_managed_mcp_state,
+    provider_managed_base_url,
 )
 
 
@@ -82,6 +83,12 @@ def test_build_provider_managed_mcp_state_rejects_prompt_filters() -> None:
             agent_config=config,
             server_settings_by_name=settings,
         )
+
+
+def test_provider_managed_base_url_strips_endpoint_suffixes() -> None:
+    assert provider_managed_base_url("https://example.com/mcp") == "https://example.com"
+    assert provider_managed_base_url("https://example.com/api/mcp") == "https://example.com/api"
+    assert provider_managed_base_url("https://example.com/sse") == "https://example.com"
 
 
 def test_build_anthropic_provider_mcp_payload() -> None:
@@ -161,3 +168,26 @@ def test_build_openai_provider_mcp_tools() -> None:
             "defer_loading": True,
         }
     ]
+
+
+def test_build_provider_managed_mcp_state_uses_provider_base_url() -> None:
+    config = AgentConfig(
+        name="billing",
+        instruction="Use provider-managed MCP.",
+        servers=["stripe"],
+    )
+    settings = {
+        "stripe": MCPServerSettings(
+            name="stripe",
+            management="provider",
+            transport="http",
+            url="https://example.com/api/mcp",
+        )
+    }
+
+    state = build_provider_managed_mcp_state(
+        agent_config=config,
+        server_settings_by_name=settings,
+    )
+
+    assert state.attachments[0].server_url == "https://example.com/api"

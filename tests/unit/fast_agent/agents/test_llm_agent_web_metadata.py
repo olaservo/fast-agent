@@ -285,6 +285,37 @@ async def test_show_assistant_message_replays_provider_mcp_tools() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_show_assistant_message_skips_empty_panel_for_tool_only_remote_turn() -> None:
+    agent = LlmAgent(AgentConfig("provider-mcp-tool-only"))
+    capture_display = _CaptureDisplay()
+    agent.display = capture_display
+
+    message = PromptMessageExtended(
+        role="assistant",
+        content=[],
+        stop_reason=LlmStopReason.END_TURN,
+        channels={
+            ANTHROPIC_SERVER_TOOLS_CHANNEL: [
+                TextContent(
+                    type="text",
+                    text='{"type":"mcp_tool_use","id":"mcptoolu_1","name":"hf_whoami","server_name":"huggingface_mcp","input":{}}',
+                ),
+                TextContent(
+                    type="text",
+                    text='{"type":"mcp_tool_result","tool_use_id":"mcptoolu_1","is_error":false,"content":[{"type":"text","text":"evalstate"}]}',
+                ),
+            ]
+        },
+    )
+
+    await agent.show_assistant_message(message)
+
+    assert capture_display.event_order == ["tool_call", "tool_result"]
+    assert capture_display.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_show_assistant_message_suppresses_bottom_metadata_for_shell_tool_use() -> None:
     agent = LlmAgent(AgentConfig("shell-tool-use"))
     capture_display = _CaptureDisplay()

@@ -19,6 +19,7 @@ from fast_agent.context import Context
 from fast_agent.core.exceptions import AgentConfigError
 from fast_agent.llm.fastagent_llm import FastAgentLLM
 from fast_agent.llm.provider_types import Provider
+from fast_agent.mcp_server_registry import ServerRegistry
 from fast_agent.types import RequestParams
 
 
@@ -91,33 +92,46 @@ class _StubProviderManagedLLM(FastAgentLLM):
         return []
 
 
-def test_provider_managed_servers_are_excluded_from_local_aggregator() -> None:
+@pytest.mark.asyncio
+async def test_provider_managed_servers_remain_visible_without_local_aggregator_attach() -> None:
+    server_settings = {
+        "stripe": MCPServerSettings(
+            name="stripe",
+            management="provider",
+            transport="http",
+            url="https://mcp.stripe.com",
+        ),
+        "filesystem": MCPServerSettings(
+            name="filesystem",
+            command="npx",
+            args=["@modelcontextprotocol/server-filesystem"],
+        ),
+    }
+    server_registry = ServerRegistry()
+    server_registry.registry = server_settings
     context = Context(
         config=Settings(
             mcp=MCPSettings(
-                servers={
-                    "stripe": MCPServerSettings(
-                        name="stripe",
-                        management="provider",
-                        transport="http",
-                        url="https://mcp.stripe.com",
-                    ),
-                    "filesystem": MCPServerSettings(
-                        name="filesystem",
-                        command="npx",
-                        args=["@modelcontextprotocol/server-filesystem"],
-                    ),
-                }
+                servers=server_settings,
             )
-        )
+        ),
+        server_registry=server_registry,
     )
     agent = McpAgent(
         config=AgentConfig(name="billing", servers=["stripe", "filesystem"]),
         context=context,
+        connection_persistence=False,
     )
 
     assert agent.aggregator.server_names == ["filesystem"]
-    assert agent.list_attached_mcp_servers() == []
+    assert agent.list_attached_mcp_servers() == ["stripe"]
+    assert await agent.list_servers() == ["filesystem", "stripe"]
+
+    agent.aggregator.initialized = True
+    status_map = await agent.get_server_status()
+    assert set(status_map) == {"filesystem", "stripe"}
+    assert status_map["stripe"].is_connected is True
+    assert status_map["stripe"].transport == "http"
 
 
 def test_provider_managed_servers_attach_state_to_supported_llm() -> None:

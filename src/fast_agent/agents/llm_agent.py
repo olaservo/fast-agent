@@ -178,19 +178,30 @@ class LlmAgent(LlmDecorator):
         hook_indicator = self._resolve_assistant_hook_indicator(show_hook_indicator)
         message_text = message
         if render_message:
-            display_remote_tool_activities(self.display, message, name=display_name)
-            await self.display.show_assistant_message(
-                message_text,
-                bottom_items=bottom_items,
-                highlight_index=highlight_index,
-                max_item_length=max_item_length,
+            rendered_remote_activities = display_remote_tool_activities(
+                self.display,
+                message,
                 name=display_name,
-                model=display_model,
-                additional_message=additional_message_text,
-                pre_content=pre_content,
-                render_markdown=render_markdown,
-                show_hook_indicator=hook_indicator,
             )
+            should_render_assistant_message = not (
+                rendered_remote_activities
+                and message.last_text() is None
+                and additional_message_text is None
+                and pre_content is None
+            )
+            if should_render_assistant_message:
+                await self.display.show_assistant_message(
+                    message_text,
+                    bottom_items=bottom_items,
+                    highlight_index=highlight_index,
+                    max_item_length=max_item_length,
+                    name=display_name,
+                    model=display_model,
+                    additional_message=additional_message_text,
+                    pre_content=pre_content,
+                    render_markdown=render_markdown,
+                    show_hook_indicator=hook_indicator,
+                )
         else:
             if status_message_text is not None:
                 self.display.show_status_message(status_message_text)

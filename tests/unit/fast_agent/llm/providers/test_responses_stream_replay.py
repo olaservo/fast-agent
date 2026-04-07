@@ -258,6 +258,54 @@ async def test_openresponses_status_after_added_uses_registered_tool_state() -> 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_responses_stream_namespaces_mcp_call_tool_with_server_label() -> None:
+    harness = _ResponsesHarness()
+    final_response = SimpleNamespace(output=[], usage=None)
+    stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=0,
+                item_id="mcp_123",
+                item=SimpleNamespace(
+                    type="mcp_call",
+                    id="mcp_123",
+                    call_id="call_123",
+                    server_label="stripe",
+                    name="create_payment_link",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                output_index=0,
+                item_id="mcp_123",
+                item=SimpleNamespace(
+                    type="mcp_call",
+                    id="mcp_123",
+                    call_id="call_123",
+                    server_label="stripe",
+                    name="create_payment_link",
+                ),
+            ),
+            SimpleNamespace(type="response.completed", response=final_response),
+        ],
+        final_response=final_response,
+    )
+
+    await harness._process_stream(stream, model="gpt-test", capture_filename=None)
+
+    start_events = [
+        event for event in harness.tool_events if event["event_type"] == "start"
+    ]
+    stop_events = [
+        event for event in harness.tool_events if event["event_type"] == "stop"
+    ]
+    assert start_events[0]["payload"]["tool_name"] == "stripe/create_payment_link"
+    assert stop_events[-1]["payload"]["tool_name"] == "stripe/create_payment_link"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_openresponses_out_of_order_tool_events_are_ignored() -> None:
     harness = _OpenResponsesHarness()
     final_response = SimpleNamespace(output=[], usage=None)

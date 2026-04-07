@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from urllib.parse import urlparse, urlunparse
 
 from fast_agent.cli.commands.url_parser import parse_server_url
 from fast_agent.mcp.hf_auth import add_hf_auth_header
@@ -62,6 +63,21 @@ def normalize_provider_managed_url_server(*, transport: str, url: str) -> str:
     if transport == "http":
         _server_name, _transport, final_url = parse_server_url(url)
     return final_url
+
+
+def provider_managed_base_url(url: str) -> str:
+    """Return a provider-facing base URL from a normalized MCP endpoint URL."""
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    for suffix in ("/mcp", "/sse"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    clean = parsed._replace(path=path or "/", params="", query="", fragment="")
+    base_url = urlunparse(clean)
+    if base_url.endswith("/") and base_url.count("/") > 2:
+        return base_url[:-1]
+    return base_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +188,7 @@ def build_provider_managed_mcp_state(
             ProviderManagedMCPAttachment(
                 server_name=server_name,
                 server_description=settings.description,
-                server_url=settings.url,
+                server_url=provider_managed_base_url(settings.url),
                 access_token=settings.access_token,
                 defer_loading=settings.defer_loading,
             )

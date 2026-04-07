@@ -113,7 +113,7 @@ async def display_history_turn(
         flush_user_group()
 
         if message.role == "assistant":
-            display_remote_tool_activities(
+            rendered_remote_activities = display_remote_tool_activities(
                 display,
                 message,
                 name=agent_name,
@@ -151,17 +151,25 @@ async def display_history_turn(
                 bottom_items = None
                 highlight_index = None
 
-            message_payload: str | PromptMessageExtended = display_message
-            if last_text is None and additional_message is None and not badges:
-                message_payload = "<no text>"
-            await display.show_assistant_message(
-                message_text=message_payload,
-                name=agent_name,
-                bottom_items=bottom_items,
-                highlight_index=highlight_index,
-                additional_message=additional_message,
-                pre_content=pre_content,
+            should_render_assistant_message = not (
+                rendered_remote_activities
+                and last_text is None
+                and additional_message is None
+                and pre_content is None
+                and not badges
             )
+            if should_render_assistant_message:
+                message_payload: str | PromptMessageExtended = display_message
+                if last_text is None and additional_message is None and not badges:
+                    message_payload = "<no text>"
+                await display.show_assistant_message(
+                    message_text=message_payload,
+                    name=agent_name,
+                    bottom_items=bottom_items,
+                    highlight_index=highlight_index,
+                    additional_message=additional_message,
+                    pre_content=pre_content,
+                )
 
             if tool_calls:
                 for call_id, call in tool_calls.items():

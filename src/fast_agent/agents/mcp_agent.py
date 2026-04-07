@@ -166,16 +166,18 @@ class McpAgent(ABC, ToolAgent):
             server_settings_by_name = context.config.mcp.servers
         self._provider_managed_mcp_state = ProviderManagedMCPState()
         client_managed_servers = list(configured_servers)
+        provider_managed_servers: list[str] = []
         if server_settings_by_name is not None:
             self._provider_managed_mcp_state = build_provider_managed_mcp_state(
                 agent_config=self.config,
                 server_settings_by_name=server_settings_by_name,
             )
-            client_managed_servers, _provider_managed_servers = split_managed_server_names(
+            client_managed_servers, provider_managed_servers = split_managed_server_names(
                 configured_servers,
                 server_settings_by_name,
             )
         self._configured_server_names = tuple(configured_servers)
+        self._provider_managed_server_names = tuple(provider_managed_servers)
 
         # Create aggregator with composition
         self._aggregator = MCPAggregator(
@@ -186,6 +188,7 @@ class McpAgent(ABC, ToolAgent):
             config=self.config,  # Pass the full config for access to elicitation_handler
             **kwargs,
         )
+        self._aggregator.set_supplemental_attached_servers(self._provider_managed_server_names)
 
         # Store the original template - resolved instruction set after build()
         self._instruction_template = self.config.instruction
@@ -382,7 +385,45 @@ class McpAgent(ABC, ToolAgent):
         """Expose server status details for UI and diagnostics consumers."""
         if not self._aggregator:
             return {}
-        return await self._aggregator.collect_server_status()
+        status_map = await self._aggregator.collect_server_status()
+
+        server_settings_by_name = None
+        if self._context and self._context.config and self._context.config.mcp:
+            server_settings_by_name = self._context.config.mcp.servers
+
+        if not server_settings_by_name:
+            return status_map
+
+        auto_sampling = True
+        if self._context and getattr(self._context, "config", None):
+            auto_sampling = getattr(self._context.config, "auto_sampling", True)
+
+        for server_name in self._provider_managed_server_names:
+            if server_name in status_map:
+                continue
+            server_cfg = server_settings_by_name.get(server_name)
+            if server_cfg is None:
+                continue
+
+            roots = server_cfg.roots
+            elicitation = server_cfg.elicitation
+            sampling_cfg = server_cfg.sampling
+            status_map[server_name] = ServerStatus(
+                server_name=server_name,
+                transport=server_cfg.transport,
+                is_connected=True,
+                instructions_enabled=server_cfg.include_instructions,
+                roots_configured=bool(roots),
+                roots_count=len(roots) if roots else 0,
+                elicitation_mode=getattr(elicitation, "mode", None) if elicitation else None,
+                sampling_mode=(
+                    "configured"
+                    if sampling_cfg is not None
+                    else ("auto" if auto_sampling else "off")
+                ),
+            )
+
+        return status_map
 
     async def attach_mcp_server(
         self,
@@ -409,6 +450,11 @@ class McpAgent(ABC, ToolAgent):
 
     def list_attached_mcp_servers(self) -> list[str]:
         return self._unique_preserving_order(self._aggregator.list_attached_servers())
+
+    async def list_servers(self) -> list[str]:
+        return self._unique_preserving_order(
+            [*self._aggregator.server_names, *self._provider_managed_server_names]
+        )
 
     @property
     def aggregator(self) -> MCPAggregator:

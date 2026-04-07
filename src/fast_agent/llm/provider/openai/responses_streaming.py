@@ -67,7 +67,11 @@ def _responses_tool_name(item: Any) -> str:
     if item_type == "mcp_list_tools":
         return "mcp_list_tools"
     if item_type == "mcp_call":
-        return getattr(item, "name", None) or getattr(item, "tool_name", None) or "mcp_call"
+        tool_name = getattr(item, "name", None) or getattr(item, "tool_name", None)
+        server_label = getattr(item, "server_label", None)
+        if isinstance(server_label, str) and server_label and isinstance(tool_name, str) and tool_name:
+            return f"{server_label}/{tool_name}"
+        return tool_name or "mcp_call"
     return getattr(item, "name", None) or "tool"
 
 
