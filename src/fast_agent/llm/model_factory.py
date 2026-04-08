@@ -246,9 +246,7 @@ def _parse_query_overrides(
     unsupported_keys = sorted(set(query_params) - supported_keys)
     if unsupported_keys:
         joined = ", ".join(f"'{key}'" for key in unsupported_keys)
-        raise ModelConfigError(
-            f"Unsupported model query parameter(s) {joined} in '{model_spec}'"
-        )
+        raise ModelConfigError(f"Unsupported model query parameter(s) {joined} in '{model_spec}'")
 
     reasoning_effort: ReasoningEffortSetting | None = None
     text_verbosity: TextVerbosityLevel | None = None
@@ -587,7 +585,7 @@ class ModelFactory:
         "minimax2.5": "hf.MiniMaxAI/MiniMax-M2.5:novita?temperature=1.0&top_p=0.95&top_k=40",
         "minimax21": "hf.MiniMaxAI/MiniMax-M2.1:novita",
         "kimi": "hf.moonshotai/Kimi-K2-Instruct-0905:groq",
-        "gpt-oss": "hf.openai/gpt-oss-120b:sambanova",
+        "gpt-oss": "hf.openai/gpt-oss-120b:cerebras",
         "gpt-oss-20b": "hf.openai/gpt-oss-20b",
         "glm47": "hf.zai-org/GLM-4.7:cerebras",
         "glm5": "hf.zai-org/GLM-5:novita",
