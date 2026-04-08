@@ -160,6 +160,31 @@ def test_provider_managed_servers_attach_state_to_supported_llm() -> None:
     assert llm.provider_managed_mcp_state.server_names == ("stripe",)
 
 
+def test_provider_managed_servers_reject_codexresponses_llm() -> None:
+    context = Context(
+        config=Settings(
+            mcp=MCPSettings(
+                servers={
+                    "stripe": MCPServerSettings(
+                        name="stripe",
+                        management="provider",
+                        transport="http",
+                        url="https://mcp.stripe.com",
+                    )
+                }
+            )
+        )
+    )
+    agent = McpAgent(
+        config=AgentConfig(name="billing", servers=["stripe"]),
+        context=context,
+    )
+    llm = _StubProviderManagedLLM(provider=Provider.CODEX_RESPONSES)
+
+    with pytest.raises(AgentConfigError, match="OpenAI Responses provider"):
+        agent._on_llm_attached(llm)
+
+
 def test_instruction_takes_precedence_over_systemPrompt():
     """
     Test that AgentConfig.instruction takes precedence over

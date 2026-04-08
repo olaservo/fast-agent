@@ -433,7 +433,12 @@ class McpAgent(ABC, ToolAgent):
         options: MCPAttachOptions | None = None,
     ) -> MCPAttachResult:
         resolved_server_config = server_config
-        if resolved_server_config is None and self._context and self._context.config and self._context.config.mcp:
+        if (
+            resolved_server_config is None
+            and self._context
+            and self._context.config
+            and self._context.config.mcp
+        ):
             resolved_server_config = self._context.config.mcp.servers.get(server_name)
         if resolved_server_config is not None and resolved_server_config.management == "provider":
             raise AgentConfigError(
@@ -757,10 +762,10 @@ class McpAgent(ABC, ToolAgent):
         super()._on_llm_attached(llm)
 
         if self._provider_managed_mcp_state.has_servers():
-            if llm.provider not in {Provider.ANTHROPIC, Provider.RESPONSES, Provider.CODEX_RESPONSES}:
+            if llm.provider not in {Provider.ANTHROPIC, Provider.RESPONSES}:
                 raise AgentConfigError(
                     "Provider-managed MCP is only supported for Anthropic Messages "
-                    "and OpenAI Responses-family providers."
+                    "and the OpenAI Responses provider."
                 )
             if hasattr(llm, "set_provider_managed_mcp_state"):
                 cast("Any", llm).set_provider_managed_mcp_state(self._provider_managed_mcp_state)
@@ -1060,7 +1065,9 @@ class McpAgent(ABC, ToolAgent):
                     if name == "read_text_file":
                         return await self._filesystem_runtime.read_text_file(arguments, tool_use_id)
                     if name == "write_text_file":
-                        return await self._filesystem_runtime.write_text_file(arguments, tool_use_id)
+                        return await self._filesystem_runtime.write_text_file(
+                            arguments, tool_use_id
+                        )
                     if is_apply_patch_tool_name(name):
                         return await self._filesystem_runtime.apply_patch(arguments, tool_use_id)
 
@@ -1324,9 +1331,7 @@ class McpAgent(ABC, ToolAgent):
         prompt: PromptMessageExtended
         if isinstance(prompt_content, str):
             # Create a new prompt with the text and resources
-            content: list[ContentBlock] = [
-                TextContent(type="text", text=prompt_content)
-            ]
+            content: list[ContentBlock] = [TextContent(type="text", text=prompt_content)]
             content.extend(embedded_resources)
             prompt = PromptMessageExtended(role="user", content=content)
         elif isinstance(prompt_content, PromptMessage):

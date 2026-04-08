@@ -188,7 +188,7 @@ def build_provider_managed_mcp_state(
             ProviderManagedMCPAttachment(
                 server_name=server_name,
                 server_description=settings.description,
-                server_url=provider_managed_base_url(settings.url),
+                server_url=settings.url,
                 access_token=settings.access_token,
                 defer_loading=settings.defer_loading,
             )
@@ -249,6 +249,7 @@ def build_openai_provider_managed_mcp_tools(
             "type": "mcp",
             "server_label": attachment.server_name,
             "server_url": attachment.server_url,
+            "require_approval": "never",
         }
         if attachment.server_description:
             tool_payload["server_description"] = attachment.server_description

@@ -10,7 +10,7 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
-from aiohttp import WSMsgType
+from aiohttp import WSMsgType, WSServerHandshakeError
 
 RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
 RESPONSES_WEBSOCKET_BETA_HEADER_NAME = "OpenAI-Beta"
@@ -341,6 +341,12 @@ async def connect_websocket(
         else:
             async with asyncio.timeout(timeout_seconds):
                 websocket = await session.ws_connect(url, headers=dict(headers), autoping=True)
+    except WSServerHandshakeError as exc:
+        await session.close()
+        raise ResponsesWebSocketError(
+            str(exc),
+            status=exc.status,
+        ) from exc
     except Exception:
         await session.close()
         raise

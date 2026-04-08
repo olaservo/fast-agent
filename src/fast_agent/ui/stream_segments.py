@@ -639,14 +639,14 @@ def _status_chunk(status: str) -> str:
         return ""
 
     known_chunks = {
-        "in_progress": "starting search...",
+        "in_progress": "starting...",
         "queued": "queued...",
         "started": "started...",
         "searching": "searching...",
-        "completed": "search complete",
-        "failed": "search failed",
-        "cancelled": "search cancelled",
-        "incomplete": "search incomplete",
+        "completed": "completed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "incomplete": "incomplete",
     }
     return known_chunks.get(normalized, normalized.replace("_", " "))
 

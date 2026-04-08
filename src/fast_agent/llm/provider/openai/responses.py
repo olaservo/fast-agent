@@ -501,8 +501,7 @@ class ResponsesLLM(
                 if payload_saved_bytes is not None and payload_saved_ratio is not None:
                     percent_saved = round(payload_saved_ratio * 100.0)
                     byte_counts = (
-                        f" {sent_payload_bytes}/{full_payload_bytes}B"
-                        f" ({percent_saved}% saved)"
+                        f" {sent_payload_bytes}/{full_payload_bytes}B ({percent_saved}% saved)"
                     )
                 else:
                     byte_counts = f" {sent_payload_bytes}/{full_payload_bytes}B"
@@ -694,7 +693,7 @@ class ResponsesLLM(
             base_args["tools"] = tools_payload
 
         if self.provider_managed_mcp_state.has_servers():
-            if self.provider not in {Provider.RESPONSES, Provider.CODEX_RESPONSES}:
+            if self.provider != Provider.RESPONSES:
                 raise ModelConfigError(
                     "Provider-managed MCP is not supported for this Responses-family provider."
                 )

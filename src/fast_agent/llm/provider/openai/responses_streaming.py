@@ -50,6 +50,26 @@ def _web_search_status_chunk(status: str) -> str:
     return status
 
 
+def _mcp_status_chunk(item_type: str, status: str) -> str:
+    if item_type == "mcp_list_tools":
+        if status == "in_progress":
+            return "loading remote tool definitions..."
+        if status == "completed":
+            return "remote tool definitions loaded"
+        if status == "failed":
+            return "failed to load remote tool definitions"
+        return status
+    if item_type == "mcp_call":
+        if status == "in_progress":
+            return "calling remote MCP tool..."
+        if status == "completed":
+            return "remote MCP tool call complete"
+        if status == "failed":
+            return "remote MCP tool call failed"
+        return status
+    return status
+
+
 def _item_is_responses_tool(item: Any) -> bool:
     return getattr(item, "type", None) in {
         "function_call",
@@ -291,8 +311,10 @@ class ResponsesStreamingMixin(OpenAIToolNotificationMixin):
                     payload["chunk"] = _web_search_status_chunk(str(status))
                 elif tool_info.item_type == "mcp_list_tools":
                     payload["tool_display_name"] = _MCP_LIST_TOOLS_PROGRESS_LABEL
+                    payload["chunk"] = _mcp_status_chunk("mcp_list_tools", str(status))
                 elif tool_info.item_type == "mcp_call":
                     payload["tool_display_name"] = _MCP_CALL_PROGRESS_LABEL
+                    payload["chunk"] = _mcp_status_chunk("mcp_call", str(status))
                 self._notify_tool_stream_listeners("status", payload)
 
                 if event_type in _TOOL_START_EVENT_TYPES and not tool_info.start_notified:

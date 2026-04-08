@@ -82,6 +82,33 @@ def test_tool_stream_status_uses_fallback_chunk_when_missing() -> None:
     assert "searching..." in text
 
 
+def test_tool_stream_status_for_mcp_does_not_use_search_copy() -> None:
+    assembler = _make_assembler()
+
+    assembler.handle_tool_event(
+        "status",
+        {
+            "tool_name": "mcp_list_tools",
+            "tool_display_name": "Loading MCP tools",
+            "tool_use_id": "mcp-2",
+            "status": "completed",
+        },
+    )
+    assembler.handle_tool_event(
+        "stop",
+        {
+            "tool_name": "mcp_list_tools",
+            "tool_display_name": "Loading MCP tools",
+            "tool_use_id": "mcp-2",
+        },
+    )
+
+    text = "".join(segment.text for segment in assembler.segments)
+    assert "Loading MCP tools" in text
+    assert "completed" in text
+    assert "search complete" not in text
+
+
 def test_tool_stream_replace_resets_snapshot_content() -> None:
     assembler = _make_assembler()
 

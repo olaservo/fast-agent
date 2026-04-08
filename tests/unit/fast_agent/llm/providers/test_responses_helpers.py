@@ -1121,6 +1121,7 @@ def test_build_response_args_includes_provider_managed_mcp_tools() -> None:
             "server_label": "stripe",
             "server_description": "Stripe official MCP",
             "server_url": "https://mcp.stripe.com",
+            "require_approval": "never",
             "authorization": "token-123",
             "allowed_tools": ["create_payment_link"],
             "defer_loading": True,
@@ -1458,6 +1459,37 @@ def test_openresponses_rejects_provider_managed_mcp_tools() -> None:
         )
 
 
+def test_codexresponses_rejects_provider_managed_mcp_tools() -> None:
+    llm = _build_responses_family_llm(
+        Provider.CODEX_RESPONSES,
+        model_name="gpt-5.4",
+    )
+    llm.set_provider_managed_mcp_state(
+        ProviderManagedMCPState(
+            attachments=(
+                ProviderManagedMCPAttachment(
+                    server_name="stripe",
+                    server_description="Stripe official MCP",
+                    server_url="https://mcp.stripe.com/mcp",
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(ModelConfigError, match="Provider-managed MCP is not supported"):
+        llm._build_response_args(
+            input_items=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
+            request_params=RequestParams(model="gpt-5.4"),
+            tools=None,
+        )
+
+
 def test_codex_web_search_defaults_disabled() -> None:
     llm = _build_codex_responses_llm_with_web_search()
 
@@ -1677,3 +1709,44 @@ async def test_stream_process_emits_web_search_status_events() -> None:
     assert first_start_payload["tool_name"] == "web_search"
     assert first_start_payload["tool_display_name"] == "Searching the web"
     assert first_start_payload["chunk"] == "starting search..."
+
+
+@pytest.mark.asyncio
+async def test_stream_process_emits_mcp_status_events_with_mcp_copy() -> None:
+    harness = _StreamingHarness()
+    final_response = SimpleNamespace(
+        output=[SimpleNamespace(type="mcp_list_tools", id="mcp_123")],
+        usage=None,
+    )
+    stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=0,
+                item=SimpleNamespace(type="mcp_list_tools", id="mcp_123"),
+                item_id="mcp_123",
+            ),
+            SimpleNamespace(
+                type="response.mcp_list_tools.in_progress",
+                output_index=0,
+                item_id="mcp_123",
+            ),
+            SimpleNamespace(
+                type="response.mcp_list_tools.completed",
+                output_index=0,
+                item_id="mcp_123",
+            ),
+            SimpleNamespace(type="response.completed", response=final_response),
+        ],
+        final_response=final_response,
+    )
+
+    await harness._process_stream(stream, model="gpt-test", capture_filename=None)
+
+    status_payloads = [
+        payload for event_type, payload in harness.events if event_type == "status"
+    ]
+    assert status_payloads
+    assert status_payloads[0]["tool_display_name"] == "Loading MCP tools"
+    assert status_payloads[0]["chunk"] == "loading remote tool definitions..."
+    assert status_payloads[-1]["chunk"] == "remote tool definitions loaded"

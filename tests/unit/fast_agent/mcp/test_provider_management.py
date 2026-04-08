@@ -118,7 +118,7 @@ def test_build_anthropic_provider_mcp_payload() -> None:
         {
             "type": "url",
             "name": "stripe",
-            "url": "https://mcp.stripe.com",
+            "url": "https://mcp.stripe.com/mcp",
             "authorization_token": "token-123",
         }
     ]
@@ -161,7 +161,8 @@ def test_build_openai_provider_mcp_tools() -> None:
         {
             "type": "mcp",
             "server_label": "stripe",
-            "server_url": "https://mcp.stripe.com",
+            "server_url": "https://mcp.stripe.com/mcp",
+            "require_approval": "never",
             "server_description": "Stripe official MCP",
             "authorization": "token-123",
             "allowed_tools": ["create_payment_link"],
@@ -170,7 +171,7 @@ def test_build_openai_provider_mcp_tools() -> None:
     ]
 
 
-def test_build_provider_managed_mcp_state_uses_provider_base_url() -> None:
+def test_build_provider_managed_mcp_state_preserves_provider_endpoint_url() -> None:
     config = AgentConfig(
         name="billing",
         instruction="Use provider-managed MCP.",
@@ -190,4 +191,4 @@ def test_build_provider_managed_mcp_state_uses_provider_base_url() -> None:
         server_settings_by_name=settings,
     )
 
-    assert state.attachments[0].server_url == "https://example.com/api"
+    assert state.attachments[0].server_url == "https://example.com/api/mcp"
