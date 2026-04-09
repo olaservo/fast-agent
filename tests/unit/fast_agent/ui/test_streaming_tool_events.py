@@ -145,7 +145,7 @@ def test_tool_stream_remote_labels_are_explicit() -> None:
         "start",
         {
             "tool_name": "huggingface_mcp/hf_whoami",
-            "tool_display_name": "remote tool call: huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool: hf_whoami",
             "tool_use_id": "mcp-1",
             "chunk": "{}",
         },
@@ -154,7 +154,7 @@ def test_tool_stream_remote_labels_are_explicit() -> None:
         "replace",
         {
             "tool_name": "huggingface_mcp/hf_whoami",
-            "tool_display_name": "remote tool result: huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool: hf_whoami",
             "tool_use_id": "mcp-1:result",
             "chunk": "evalstate",
         },
@@ -163,14 +163,13 @@ def test_tool_stream_remote_labels_are_explicit() -> None:
         "stop",
         {
             "tool_name": "huggingface_mcp/hf_whoami",
-            "tool_display_name": "remote tool result: huggingface_mcp/hf_whoami",
+            "tool_display_name": "remote tool: hf_whoami",
             "tool_use_id": "mcp-1:result",
         },
     )
 
     text = "\n".join(segment.text for segment in assembler.segments)
-    assert "remote tool call: huggingface_mcp/hf_whoami" in text
-    assert "remote tool result: huggingface_mcp/hf_whoami" in text
+    assert "remote tool: hf_whoami" in text
 
 
 def test_tool_stream_apply_patch_preview_keeps_other_args() -> None:
@@ -223,6 +222,27 @@ def test_tool_stream_apply_patch_preview_supports_shell_aliases() -> None:
     text = "".join(segment.text for segment in assembler.segments)
     assert "apply_patch preview:" in text
     assert "*** Delete File: a.txt" in text
+
+
+def test_tool_stream_direct_apply_patch_preview_appears_before_stop() -> None:
+    assembler = _make_assembler()
+    partial_chunk = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new"
+
+    assembler.handle_tool_event(
+        "delta",
+        {
+            "tool_name": "apply_patch",
+            "tool_use_id": "tool-apply-direct-1",
+            "chunk": partial_chunk,
+        },
+    )
+
+    segment = assembler.segments[0]
+    assert segment.code_preview is None
+    assert "apply_patch preview: streaming patch" in segment.text
+    assert "*** Update File: a.txt" in segment.text
+    assert "-old" in segment.text
+    assert "+new" in segment.text
 
 
 def test_extract_partial_json_string_field_decodes_incomplete_code_value() -> None:
@@ -410,7 +430,7 @@ def test_tool_stream_code_preview_uses_namespaced_tool_metadata() -> None:
         "delta",
         {
             "tool_name": "huggingface_mcp/hf_hub_query_raw",
-            "tool_display_name": "remote tool call: huggingface_mcp/hf_hub_query_raw",
+            "tool_display_name": "remote tool: hf_hub_query_raw",
             "tool_use_id": "tool-code-2",
             "chunk": '{"query":"count","code":"resp = await hf_trending()\\nprin',
         },
