@@ -54,7 +54,10 @@ from fast_agent.llm.model_reference_diagnostics import (
 )
 from fast_agent.llm.provider_types import Provider
 from fast_agent.ui.adapters.tui_io import TuiCommandIO
-from fast_agent.ui.llamacpp_model_picker import run_llamacpp_model_picker_async
+from fast_agent.ui.llamacpp_model_picker import (
+    LlamaCppModelPickerContext,
+    run_llamacpp_model_picker_async,
+)
 from fast_agent.ui.model_reference_picker import (
     ModelReferencePickerItem,
     run_model_reference_picker_async,
@@ -951,9 +954,9 @@ async def _select_llamacpp_model(
     if not interactive:
         return None
 
-    runtime_context_cache: dict[str, int | None] = {}
+    runtime_context_cache: dict[str, LlamaCppModelPickerContext] = {}
 
-    async def _load_runtime_context(model_id: str) -> int | None:
+    async def _load_runtime_context(model_id: str) -> LlamaCppModelPickerContext:
         if model_id in runtime_context_cache:
             return runtime_context_cache[model_id]
         discovered_model = await interrogate_llamacpp_model(
@@ -961,8 +964,12 @@ async def _select_llamacpp_model(
             model_id=model_id,
             api_key=interrogation_api_key,
         )
-        runtime_context_cache[model_id] = discovered_model.runtime_context_window
-        return discovered_model.runtime_context_window
+        loaded_context = LlamaCppModelPickerContext(
+            runtime_context_window=discovered_model.runtime_context_window,
+            training_context_window=discovered_model.listing.training_context_window,
+        )
+        runtime_context_cache[model_id] = loaded_context
+        return loaded_context
 
     picker_result = await run_llamacpp_model_picker_async(
         catalog.models,
@@ -1188,6 +1195,9 @@ def _emit_llamacpp_import_summary(
     include_sampling_defaults: bool,
     print_overlay_yaml: bool,
 ) -> None:
+    context_window = result.discovered_model.effective_context_window
+    context_source = result.discovered_model.context_window_source
+
     typer.echo(
         "Discovered llama.cpp model "
         f"{result.discovered_model.listing.model_id!r} from {result.catalog.models_url}."
@@ -1197,6 +1207,11 @@ def _emit_llamacpp_import_summary(
     else:
         typer.echo("Dry run only; no overlay files were written.")
     typer.echo(f"Overlay token: {result.overlay_name}")
+    if context_window is not None:
+        if context_source == "runtime":
+            typer.echo(f"Context window: {context_window} (runtime /props)")
+        elif context_source == "catalog":
+            typer.echo(f"Context window: {context_window} (catalog fallback; /props reported none)")
     typer.echo(
         f'Use it now: fast-agent go --model {result.overlay_name} --message "hello"'
     )

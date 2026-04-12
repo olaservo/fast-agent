@@ -250,6 +250,12 @@ class UsageAccumulator(BaseModel):
         """Set the effective context window size for this accumulator."""
         self._context_window_size = value
 
+    def reset(self) -> None:
+        """Clear accumulated turn usage while preserving context-window configuration."""
+        self.turns = []
+        self.model = None
+        self.last_cache_activity_time = None
+
     def add_turn(self, turn: TurnUsage) -> None:
         """Add a new turn to the accumulator"""
         self.turns.append(turn)

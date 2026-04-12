@@ -72,6 +72,10 @@ logger:
   truncate_tools: true
   # Streaming renderer for assistant responses: "markdown", "plain", or "none"
   streaming: markdown
+  # Render markdown code fences with Rich Syntax instead of markdown fence blocks
+  render_fences_with_syntax: true
+  # Wrap Syntax-rendered code blocks instead of cropping at the terminal edge
+  code_word_wrap: false
 
 # MCP Servers (target shorthand)
 mcp:

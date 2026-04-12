@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -57,6 +58,12 @@ class _ToolLoopAgent(MessageHistoryAgentProtocol, Protocol):
 
 
 _logger = get_logger(__name__)
+
+_HOOK_STATUS_BUCKET_BEFORE_LLM_CALL = "before_llm_call"
+_HOOK_STATUS_BUCKET_AFTER_LLM_CALL = "after_llm_call"
+_HOOK_STATUS_BUCKET_BEFORE_TOOL_CALL = "before_tool_call"
+_HOOK_STATUS_BUCKET_AFTER_TOOL_RESULTS = "after_tool_results"
+_HOOK_STATUS_BUCKET_AFTER_TURN_COMPLETE = "after_turn_complete"
 
 
 HistoryRollbackStatus = Literal[
@@ -136,6 +143,28 @@ class ToolRunner:
         self._pending_tool_response: PromptMessageExtended | None = None
         self._staged_terminal_response: PromptMessageExtended | None = None
 
+    def _defer_hook_status_messages(self, bucket: str) -> AbstractContextManager[None]:
+        # TODO: Replace this post-hook flush boundary with a first-class
+        # streaming/display event path once hook output participates in the
+        # live renderer instead of the status-line fallback.
+        from fast_agent.agents.llm_agent import LlmAgent
+
+        if isinstance(self._agent, LlmAgent):
+            return self._agent.defer_hook_status_messages(bucket)
+        return nullcontext()
+
+    def _flush_deferred_hook_status_messages(self, bucket: str | None = None) -> None:
+        from fast_agent.agents.llm_agent import LlmAgent
+
+        if isinstance(self._agent, LlmAgent):
+            self._agent.flush_deferred_hook_status_messages(bucket)
+
+    def _clear_deferred_hook_status_messages(self, bucket: str | None = None) -> None:
+        from fast_agent.agents.llm_agent import LlmAgent
+
+        if isinstance(self._agent, LlmAgent):
+            self._agent.clear_deferred_hook_status_messages(bucket)
+
     def __aiter__(self) -> "ToolRunner":
         return self
 
@@ -159,7 +188,11 @@ class ToolRunner:
         await self._ensure_tools_ready()
 
         if self._hooks.before_llm_call is not None:
-            await self._hooks.before_llm_call(self, self._delta_messages)
+            try:
+                with self._defer_hook_status_messages(_HOOK_STATUS_BUCKET_BEFORE_LLM_CALL):
+                    await self._hooks.before_llm_call(self, self._delta_messages)
+            finally:
+                self._flush_deferred_hook_status_messages(_HOOK_STATUS_BUCKET_BEFORE_LLM_CALL)
 
         assistant_message = await self._agent._tool_runner_llm_step(
             self._delta_messages,
@@ -169,7 +202,22 @@ class ToolRunner:
 
         self._last_message = assistant_message
         if self._hooks.after_llm_call is not None:
-            await self._hooks.after_llm_call(self, assistant_message)
+            bucket = (
+                _HOOK_STATUS_BUCKET_AFTER_TOOL_RESULTS
+                if assistant_message.stop_reason == LlmStopReason.TOOL_USE
+                else _HOOK_STATUS_BUCKET_AFTER_LLM_CALL
+            )
+            try:
+                with self._defer_hook_status_messages(bucket):
+                    await self._hooks.after_llm_call(self, assistant_message)
+            except Exception:
+                if assistant_message.stop_reason == LlmStopReason.TOOL_USE:
+                    self._clear_deferred_hook_status_messages(bucket)
+                else:
+                    self._flush_deferred_hook_status_messages(bucket)
+                raise
+            if assistant_message.stop_reason != LlmStopReason.TOOL_USE:
+                self._flush_deferred_hook_status_messages(bucket)
 
         if assistant_message.stop_reason == LlmStopReason.TOOL_USE:
             self._pending_tool_request = assistant_message
@@ -200,10 +248,17 @@ class ToolRunner:
 
             # Fire after_turn_complete hook once the entire turn is done
             if self._hooks.after_turn_complete is not None:
-                await self._hooks.after_turn_complete(self, last)
+                try:
+                    with self._defer_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_TURN_COMPLETE):
+                        await self._hooks.after_turn_complete(self, last)
+                finally:
+                    self._flush_deferred_hook_status_messages(
+                        _HOOK_STATUS_BUCKET_AFTER_TURN_COMPLETE
+                    )
 
             return last
         except asyncio.CancelledError:
+            self._clear_deferred_hook_status_messages()
             rollback_state = self._reset_history_after_cancelled_turn()
             self._record_cancelled_turn(
                 reason="cancelled",
@@ -212,6 +267,7 @@ class ToolRunner:
             await self._persist_cancelled_turn_state_after_task_cancel()
             raise
         except KeyboardInterrupt:
+            self._clear_deferred_hook_status_messages()
             rollback_state = self._reset_history_after_cancelled_turn()
             self._record_cancelled_turn(
                 reason="interrupted",
@@ -220,6 +276,7 @@ class ToolRunner:
             await self._persist_cancelled_turn_state()
             raise
         except Exception:
+            self._clear_deferred_hook_status_messages()
             await self._persist_exception_turn_state()
             raise
 
@@ -408,7 +465,13 @@ class ToolRunner:
         try:
             hook_phase = "before_tool_call"
             if self._hooks.before_tool_call is not None:
-                await self._hooks.before_tool_call(self, self._pending_tool_request)
+                try:
+                    with self._defer_hook_status_messages(_HOOK_STATUS_BUCKET_BEFORE_TOOL_CALL):
+                        await self._hooks.before_tool_call(self, self._pending_tool_request)
+                finally:
+                    self._flush_deferred_hook_status_messages(
+                        _HOOK_STATUS_BUCKET_BEFORE_TOOL_CALL
+                    )
             hook_phase = "run_tools"
             tool_message = await self._agent.run_tools(
                 self._pending_tool_request, request_params=self._request_params
@@ -436,9 +499,14 @@ class ToolRunner:
 
         if self._hooks.after_tool_call is not None:
             try:
-                await self._hooks.after_tool_call(self, tool_message)
+                with self._defer_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_TOOL_RESULTS):
+                    await self._hooks.after_tool_call(self, tool_message)
             except Exception as exc:
                 _logger.error("Tool hook failed after tool call", exc_info=exc)
+            finally:
+                self._flush_deferred_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_TOOL_RESULTS)
+        else:
+            self._flush_deferred_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_TOOL_RESULTS)
         self._pending_tool_request = None
 
         return tool_message
@@ -619,7 +687,11 @@ class ToolRunner:
                 self._append_history_messages(tool_message, terminal_message)
 
             if self._hooks.after_llm_call is not None:
-                await self._hooks.after_llm_call(self, terminal_message)
+                try:
+                    with self._defer_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_LLM_CALL):
+                        await self._hooks.after_llm_call(self, terminal_message)
+                finally:
+                    self._flush_deferred_hook_status_messages(_HOOK_STATUS_BUCKET_AFTER_LLM_CALL)
 
             self._staged_terminal_response = terminal_message
             self._done = True

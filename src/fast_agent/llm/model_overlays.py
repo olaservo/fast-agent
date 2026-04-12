@@ -531,13 +531,14 @@ def _settings_environment_override(
     if settings is None:
         return None
 
+    raw_config_file = getattr(settings, "_config_file", None)
+    config_file = raw_config_file if isinstance(raw_config_file, str) and raw_config_file.strip() else None
     environment_dir = getattr(settings, "environment_dir", None)
-    if environment_dir is None:
+    if environment_dir is None and not (start_path is None and config_file is not None):
         return None
 
     base_path = (start_path or Path.cwd()).resolve()
-    config_file = getattr(settings, "_config_file", None)
-    if start_path is None and isinstance(config_file, str) and config_file.strip():
+    if start_path is None and config_file is not None:
         base_path = Path(config_file).expanduser().resolve().parent
 
     return base_path, environment_dir

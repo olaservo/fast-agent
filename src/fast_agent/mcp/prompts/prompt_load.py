@@ -248,9 +248,7 @@ def _rehydrate_responses_usage(
     if usage_accumulator is None:
         return None
 
-    usage_accumulator.turns = []
-    usage_accumulator.model = None
-    usage_accumulator.last_cache_activity_time = None
+    usage_accumulator.reset()
 
     if not payloads:
         return None

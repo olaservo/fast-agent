@@ -1251,6 +1251,7 @@ class FastAgentLLM(ContextDependent, FastAgentLLMProtocol, Generic[MessageParamT
         """Reset stored message history while optionally retaining prompt templates."""
 
         self.history.clear(clear_prompts=clear_prompts)
+        self._usage_accumulator.reset()
 
     def _api_key(self):
         if self._init_api_key is not None:

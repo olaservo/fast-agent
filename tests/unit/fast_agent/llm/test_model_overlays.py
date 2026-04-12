@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from fast_agent.config import Settings, update_global_settings
+from fast_agent.config import Settings, get_settings, update_global_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -376,6 +376,49 @@ metadata:
     monkeypatch.delenv("ENVIRONMENT_DIR", raising=False)
 
     resolved = ModelFactory.resolve_model_spec("picker-local")
+
+    assert resolved.source == "overlay"
+    assert resolved.overlay_name == "picker-local"
+    assert resolved.wire_model_name == "overlay-tests/Qwen-Picker"
+
+
+def test_overlay_resolution_uses_config_relative_default_environment_dir_when_cwd_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    env_dir = project_dir / ".fast-agent"
+    _write_overlay(
+        env_dir,
+        "picker-overlay.yaml",
+        """
+name: picker-local
+provider: openresponses
+model: overlay-tests/Qwen-Picker
+connection:
+  base_url: http://localhost:8081/v1
+  auth: none
+metadata:
+  context_window: 65536
+  max_output_tokens: 2048
+""".strip(),
+    )
+
+    previous_settings = get_settings()
+    settings = Settings(environment_dir=None)
+    settings._config_file = str(project_dir / "fastagent.config.yaml")
+    update_global_settings(settings)
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    monkeypatch.chdir(work_dir)
+    monkeypatch.delenv("ENVIRONMENT_DIR", raising=False)
+
+    try:
+        resolved = ModelFactory.resolve_model_spec("picker-local")
+    finally:
+        update_global_settings(previous_settings)
 
     assert resolved.source == "overlay"
     assert resolved.overlay_name == "picker-local"

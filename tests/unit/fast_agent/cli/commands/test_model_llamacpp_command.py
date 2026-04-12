@@ -41,7 +41,11 @@ class _LlamaCppServer:
         self.thread.join(timeout=5)
 
 
-def _start_llamacpp_server() -> _LlamaCppServer:
+def _start_llamacpp_server(
+    *,
+    null_props_params: bool = False,
+    zero_runtime_context: bool = False,
+) -> _LlamaCppServer:
     state = _ServerState()
 
     class _Handler(BaseHTTPRequestHandler):
@@ -109,15 +113,19 @@ def _start_llamacpp_server() -> _LlamaCppServer:
                 else:
                     payload = {
                         "default_generation_settings": {
-                            "n_ctx": 75264,
-                            "params": {
-                                "temperature": 0.800000011920929,
-                                "top_k": 40,
-                                "top_p": 0.949999988079071,
-                                "min_p": 0.05000000074505806,
-                                "max_tokens": -1,
-                                "n_predict": -1,
-                            },
+                            "n_ctx": 0 if zero_runtime_context else 75264,
+                            "params": (
+                                None
+                                if null_props_params
+                                else {
+                                    "temperature": 0.800000011920929,
+                                    "top_k": 40,
+                                    "top_p": 0.949999988079071,
+                                    "min_p": 0.05000000074505806,
+                                    "max_tokens": -1,
+                                    "n_predict": -1,
+                                }
+                            ),
                         },
                         "model_alias": "Qwen local",
                         "modalities": {"vision": True, "audio": False},
@@ -216,7 +224,47 @@ def test_model_llamacpp_command_imports_overlay_from_models_endpoint(tmp_path: P
     assert "default_temperature" not in payload["metadata"]
     assert payload["picker"]["description"] == "Imported from llama.cpp"
     assert "Overlay token: qwen-local" in result.stdout
+    assert "Context window: 75264 (runtime /props)" in result.stdout
     assert "copied the server's current sampling defaults" not in result.stdout
+
+
+def test_model_llamacpp_import_tolerates_null_props_params_and_uses_slots_fallback(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    env_dir = workspace / ".model-env"
+    workspace.mkdir(parents=True)
+    runner = CliRunner()
+    server = _start_llamacpp_server(null_props_params=True, zero_runtime_context=True)
+
+    previous_cwd = Path.cwd()
+    try:
+        os.chdir(workspace)
+        result = runner.invoke(
+            model_command.app,
+            [
+                "llamacpp",
+                "import",
+                "--url",
+                server.base_url,
+                "--env",
+                str(env_dir),
+                "unsloth/Qwen3.5-9B-GGUF",
+                "--name",
+                "qwen-local",
+            ],
+        )
+    finally:
+        os.chdir(previous_cwd)
+        server.close()
+
+    assert result.exit_code == 0, result.stdout
+    overlay_path = env_dir / "model-overlays" / "qwen-local.yaml"
+    payload = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+    assert payload["defaults"]["max_tokens"] == 2048
+    assert "temperature" not in payload["defaults"]
+    assert payload["metadata"]["context_window"] == 262144
+    assert "Context window: 262144 (catalog fallback; /props reported none)" in result.stdout
 
     registry = load_model_overlay_registry(start_path=workspace, env_dir=env_dir)
     loaded = registry.resolve_model_string("qwen-local")
