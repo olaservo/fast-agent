@@ -13,6 +13,7 @@ from fast_agent.ui.interactive.command_dispatch import DispatchResult, dispatch_
 from fast_agent.ui.prompt import parse_special_input
 
 if TYPE_CHECKING:
+    from fast_agent.commands.protocols import HistoryEditableAgent
     from fast_agent.mcp.prompt_message_extended import PromptMessageExtended
 
 
@@ -20,9 +21,36 @@ if TYPE_CHECKING:
 class DisplayRecorder:
     messages: list[str] = field(default_factory=list)
 
+    @property
+    def markup_enabled(self) -> bool:
+        return True
+
     def show_status_message(self, content: object) -> None:
         plain = getattr(content, "plain", None)
         self.messages.append(plain if isinstance(plain, str) else str(content))
+
+    def display_message(
+        self,
+        *,
+        content: str,
+        message_type: object,
+        name: str,
+        right_info: str,
+        truncate_content: bool,
+        render_markdown: bool,
+    ) -> None:
+        del message_type, name, right_info, truncate_content, render_markdown
+        self.messages.append(content)
+
+    def show_system_message(
+        self,
+        system_prompt: str,
+        *,
+        agent_name: str,
+        server_count: int = 0,
+    ) -> None:
+        del agent_name, server_count
+        self.messages.append(system_prompt)
 
 
 @dataclass
@@ -107,6 +135,7 @@ class CommandSurfaceAgent:
     name: str
     display: DisplayRecorder = field(default_factory=DisplayRecorder)
     message_history: list[PromptMessageExtended] = field(default_factory=list)
+    llm: object | None = None
     usage_accumulator: object | None = None
     template_messages: list[PromptMessageExtended] | None = None
     aggregator: Aggregator = field(default_factory=Aggregator)
@@ -220,6 +249,16 @@ class CommandSurfaceOwner:
             return prompt_provider._agent(agent_name)
         except KeyError:
             return None
+
+    def _get_history_agent_or_warn(
+        self,
+        prompt_provider: CommandSurfaceProvider,
+        agent_name: str,
+    ) -> HistoryEditableAgent | None:
+        agent = self._get_agent_or_warn(prompt_provider, agent_name)
+        if agent is None:
+            return None
+        return cast("HistoryEditableAgent", agent)
 
 
 def merge_pinned_agents(agent_names: list[str]) -> list[str]:
