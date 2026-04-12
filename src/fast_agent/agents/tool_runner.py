@@ -9,6 +9,7 @@ from typing import (
     Literal,
     Protocol,
     Union,
+    cast,
 )
 
 from mcp.types import CallToolResult, ContentBlock, ListToolsResult, TextContent
@@ -20,7 +21,7 @@ from fast_agent.constants import (
     FAST_AGENT_USAGE,
 )
 from fast_agent.core.logging.logger import get_logger
-from fast_agent.interfaces import MessageHistoryAgentProtocol
+from fast_agent.interfaces import MessageHistoryAgentProtocol, TurnCancellationStateCapable
 from fast_agent.llm.request_params import tool_result_mode_is_passthrough
 from fast_agent.mcp.helpers.content_helpers import text_content
 from fast_agent.types import PromptMessageExtended, RequestParams
@@ -28,6 +29,8 @@ from fast_agent.types.llm_stop_reason import LlmStopReason
 
 if TYPE_CHECKING:
     from mcp import Tool
+
+    from fast_agent.hooks.hook_context import HookAgentProtocol
 
 
 class _AgentConfig(Protocol):
@@ -226,12 +229,11 @@ class ToolRunner:
         reason: str,
         rollback_state: HistoryRollbackState,
     ) -> None:
-        try:
-            setattr(self._agent, "_last_turn_cancelled", True)
-            setattr(self._agent, "_last_turn_cancel_reason", reason)
-            setattr(self._agent, "_last_turn_history_state", rollback_state)
-        except Exception:
-            pass
+        if isinstance(self._agent, TurnCancellationStateCapable):
+            self._agent.record_last_turn_cancellation(
+                reason=reason,
+                rollback_state=rollback_state,
+            )
 
     async def _persist_cancelled_turn_state(self) -> None:
         """Persist reconciled history for cancelled turns when session history is enabled."""
@@ -273,7 +275,7 @@ class ToolRunner:
             await save_session_history(
                 HookContext(
                     runner=self,
-                    agent=self._agent,
+                    agent=cast("HookAgentProtocol", self._agent),
                     message=message if message is not None else history[-1],
                     hook_type=hook_type,
                     message_history_override=history_override,

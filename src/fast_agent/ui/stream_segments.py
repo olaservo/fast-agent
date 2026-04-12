@@ -40,6 +40,7 @@ class StreamSegment:
     tool_use_id: str | None = None
     frozen: bool = False
     code_preview: "ToolCodePreview | None" = None
+    apply_patch_preview: bool = False
 
     def append(self, text: str) -> None:
         self.text += text
@@ -52,6 +53,7 @@ class StreamSegment:
             tool_use_id=self.tool_use_id,
             frozen=self.frozen,
             code_preview=self.code_preview,
+            apply_patch_preview=self.apply_patch_preview,
         )
 
 
@@ -349,6 +351,7 @@ class ToolStreamState:
     tool_name: str
     segment_index: int | None
     tool_metadata: Mapping[str, Any] | None = None
+    apply_patch_preview_max_lines: int | None = None
     raw_text: str = ""
     display_text: str = ""
     completed: bool = False
@@ -376,6 +379,50 @@ class ToolStreamState:
             complete=extracted.complete,
         )
 
+    def has_apply_patch_preview(self) -> bool:
+        tool_name = self.tool_name or "tool"
+        stripped_text = self.raw_text.strip()
+        if not stripped_text:
+            return False
+
+        if is_apply_patch_tool_name(tool_name):
+            return build_apply_patch_preview_from_input(
+                stripped_text,
+                max_lines=self.apply_patch_preview_max_lines,
+            ) is not None or (
+                stripped_text.lstrip().startswith("*** Begin Patch")
+            )
+
+        if not is_shell_execution_tool(tool_name):
+            return False
+
+        parsed_args = _parse_json_value(self.raw_text)
+        if parsed_args is not _JSON_PARSE_FAILED:
+            if not isinstance(parsed_args, dict):
+                return False
+            command = parsed_args.get("command")
+            return isinstance(command, str) and (
+                build_apply_patch_preview(
+                    command,
+                    max_lines=self.apply_patch_preview_max_lines,
+                )
+                is not None
+                or build_partial_apply_patch_preview(
+                    command,
+                    max_lines=self.apply_patch_preview_max_lines,
+                )
+                is not None
+            )
+
+        extracted = extract_partial_json_string_field(self.raw_text, field_name="command")
+        return extracted is not None and bool(extracted.value) and (
+            build_partial_apply_patch_preview(
+                extracted.value,
+                max_lines=self.apply_patch_preview_max_lines,
+            )
+            is not None
+        )
+
     def render_text(self, *, prefix: str, pretty: bool) -> str:
         tool_name = self.tool_name or "tool"
         header_prefix = prefix.strip()
@@ -388,11 +435,17 @@ class ToolStreamState:
         if is_apply_patch_tool_name(tool_name):
             stripped_text = self.raw_text.strip()
             if stripped_text:
-                preview = build_apply_patch_preview_from_input(stripped_text)
+                preview = build_apply_patch_preview_from_input(
+                    stripped_text,
+                    max_lines=self.apply_patch_preview_max_lines,
+                )
                 if preview is not None:
                     args_text = format_apply_patch_preview(preview)
                 elif stripped_text.lstrip().startswith("*** Begin Patch"):
-                    args_text = format_partial_apply_patch_preview(stripped_text)
+                    args_text = format_partial_apply_patch_preview(
+                        stripped_text,
+                        max_lines=self.apply_patch_preview_max_lines,
+                    )
 
         if self.raw_text.strip():
             parsed_args = _parse_json_value(self.raw_text)
@@ -402,7 +455,10 @@ class ToolStreamState:
                 if isinstance(parsed_args, dict) and is_shell_execution_tool(tool_name):
                     command = parsed_args.get("command")
                     if isinstance(command, str):
-                        preview = build_apply_patch_preview(command)
+                        preview = build_apply_patch_preview(
+                            command,
+                            max_lines=self.apply_patch_preview_max_lines,
+                        )
                         if preview is not None:
                             args_text = format_apply_patch_preview(
                                 preview,
@@ -412,13 +468,17 @@ class ToolStreamState:
                             partial_preview = build_partial_apply_patch_preview(
                                 command,
                                 other_args=extract_non_command_args(parsed_args),
+                                max_lines=self.apply_patch_preview_max_lines,
                             )
                             if partial_preview is not None:
                                 args_text = partial_preview
             elif is_shell_execution_tool(tool_name):
                 extracted = extract_partial_json_string_field(self.raw_text, field_name="command")
                 if extracted is not None and extracted.value:
-                    partial_preview = build_partial_apply_patch_preview(extracted.value)
+                    partial_preview = build_partial_apply_patch_preview(
+                        extracted.value,
+                        max_lines=self.apply_patch_preview_max_lines,
+                    )
                     if partial_preview is not None:
                         args_text = partial_preview
 
@@ -672,12 +732,14 @@ class StreamSegmentAssembler:
         base_kind: SegmentKind,
         tool_prefix: str,
         tool_metadata_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
+        apply_patch_preview_max_lines: int | None = None,
     ) -> None:
         self._buffer = StreamSegmentBuffer(base_kind)
         self._reasoning_parser = ReasoningStreamParser()
         self._reasoning_active = False
         self._tool_prefix = tool_prefix
         self._tool_metadata_resolver = tool_metadata_resolver
+        self._apply_patch_preview_max_lines = apply_patch_preview_max_lines
         self._tool_states: dict[str, ToolStreamState] = {}
         self._fallback_tool_counter = 0
         self._last_tool_id: str | None = None
@@ -905,6 +967,7 @@ class StreamSegmentAssembler:
             tool_name=tool_name,
             segment_index=segment_index,
             tool_metadata=tool_metadata,
+            apply_patch_preview_max_lines=self._apply_patch_preview_max_lines,
         )
         self._tool_states[tool_use_id] = state
         return state
@@ -937,6 +1000,7 @@ class StreamSegmentAssembler:
         segment = self._buffer.segments[state.segment_index]
         segment.text = state.render_text(prefix=self._tool_prefix, pretty=pretty)
         segment.code_preview = state.code_preview()
+        segment.apply_patch_preview = state.has_apply_patch_preview()
 
     def _fallback_tool_id(self) -> str:
         self._fallback_tool_counter += 1

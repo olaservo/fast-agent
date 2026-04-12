@@ -36,6 +36,15 @@ class MissingShellCwdPolicy(str, Enum):
     ERROR = "error"
 
 
+def _validate_acp_instance_scope(instance_scope: InstanceScope) -> InstanceScope:
+    if instance_scope != InstanceScope.CONNECTION:
+        raise typer.BadParameter(
+            "ACP is always connection-scoped. Remove --instance-scope or set it to connection.",
+            param_hint="--instance-scope",
+        )
+    return InstanceScope.CONNECTION
+
+
 def _resolve_instance_scope(
     ctx: typer.Context,
     *,
@@ -48,6 +57,8 @@ def _resolve_instance_scope(
         parameter_source is None or parameter_source.name == "DEFAULT"
     ):
         return InstanceScope.CONNECTION
+    if transport == ServeTransport.ACP:
+        return _validate_acp_instance_scope(instance_scope)
     return instance_scope
 
 
@@ -178,7 +189,7 @@ def serve(
     instance_scope: InstanceScope = typer.Option(
         InstanceScope.SHARED,
         "--instance-scope",
-        help="Control how MCP clients receive isolated agent instances (shared, connection, request)",
+        help="Control how clients receive isolated agent instances. ACP is always connection-scoped.",
     ),
     no_permissions: bool = typer.Option(
         False,

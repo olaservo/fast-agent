@@ -6,7 +6,7 @@ import os
 import shlex
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from rich.text import Text
 
@@ -14,6 +14,7 @@ from fast_agent.commands.command_catalog import suggest_command_action
 from fast_agent.commands.results import CommandMessage, CommandOutcome
 from fast_agent.core.exceptions import ModelConfigError
 from fast_agent.core.model_resolution import parse_model_reference_token, resolve_model_reference
+from fast_agent.interfaces import LlmCapableProtocol
 from fast_agent.llm.model_database import ModelDatabase
 from fast_agent.llm.model_factory import ModelFactory
 from fast_agent.llm.model_reference_config import (
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from fast_agent.commands.context import CommandContext
+    from fast_agent.interfaces import AgentProtocol
 
 _PROVIDER_NAME_ALIASES: dict[str, str] = {
     "hf": "huggingface",
@@ -181,9 +183,10 @@ def _build_agent_model_rows(
         except Exception:
             continue
 
-        config = getattr(agent, "config", None)
+        agent = cast("AgentProtocol", agent)
+        config = agent.config
 
-        specified = _safe_stripped(getattr(config, "model", None))
+        specified = _safe_stripped(config.model)
         effective_spec = specified or _safe_stripped(default_model)
         specified_display = specified or "<default>"
 
@@ -201,7 +204,7 @@ def _build_agent_model_rows(
         elif effective_spec:
             resolved_from_spec = effective_spec
 
-        llm = getattr(agent, "llm", None) or getattr(agent, "_llm", None)
+        llm = agent.llm if isinstance(agent, LlmCapableProtocol) else None
         llm_model = _safe_stripped(getattr(llm, "model_name", None)) if llm is not None else None
 
         if reference_error:

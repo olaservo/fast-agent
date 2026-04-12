@@ -19,6 +19,7 @@ from typing import (
     Awaitable,
     Callable,
     Iterable,
+    Literal,
     Sequence,
     cast,
 )
@@ -45,7 +46,7 @@ from fast_agent.acp.slash.handlers import skills as skills_slash_handlers
 from fast_agent.acp.slash.handlers import status as status_slash_handlers
 from fast_agent.acp.slash.handlers import tools as tools_slash_handlers
 from fast_agent.commands.command_catalog import command_action_names
-from fast_agent.commands.context import CommandContext, StaticAgentProvider
+from fast_agent.commands.context import CommandContext
 from fast_agent.commands.handlers import model as model_handlers
 from fast_agent.commands.protocols import ACPCommandAllowlistProvider
 from fast_agent.commands.renderers.command_markdown import render_command_outcome_markdown
@@ -374,7 +375,7 @@ class SlashCommandHandler:
         if agent is None:
             return None
         try:
-            return getattr(agent, "llm", None) or getattr(agent, "_llm", None)
+            return agent.llm
         except Exception:
             return None
 
@@ -505,15 +506,33 @@ class SlashCommandHandler:
     def _build_card_manager(self) -> _ACPAgentCardManager:
         return _ACPAgentCardManager(self)
 
+    def _agent_provider(self) -> "AgentProvider":
+        return cast("AgentProvider", self.instance.app)
+
+    def _resolve_acp_session_metadata(
+        self,
+    ) -> tuple[object | None, Literal["workspace", "app"], object | None]:
+        if self._acp_context is None:
+            return None, "workspace", None
+
+        session_cwd = self._acp_context.session_cwd
+
+        session_store_scope: Literal["workspace", "app"] = "workspace"
+        raw_session_store_scope = self._acp_context.session_store_scope
+        if raw_session_store_scope == "workspace":
+            session_store_scope = "workspace"
+        elif raw_session_store_scope == "app":
+            session_store_scope = "app"
+
+        return session_cwd, session_store_scope, self._acp_context.session_store_cwd
+
     def _build_command_context(self) -> CommandContext:
         settings = get_settings()
-        provider = getattr(self.instance, "app", None)
-        if provider is None:
-            provider = StaticAgentProvider(self.instance.agents)
-        raw_session_cwd = getattr(self._acp_context, "session_cwd", None)
-        raw_session_store_cwd = getattr(self._acp_context, "session_store_cwd", None)
+        raw_session_cwd, session_store_scope, raw_session_store_cwd = (
+            self._resolve_acp_session_metadata()
+        )
         return CommandContext(
-            agent_provider=cast("AgentProvider", provider),
+            agent_provider=self._agent_provider(),
             current_agent_name=self.current_agent_name,
             io=ACPCommandIO(),
             settings=settings,
@@ -523,11 +542,7 @@ class SlashCommandHandler:
                 if raw_session_cwd
                 else None
             ),
-            session_store_scope=getattr(
-                self._acp_context,
-                "session_store_scope",
-                "workspace",
-            ),
+            session_store_scope=session_store_scope,
             session_store_cwd=(
                 Path(str(raw_session_store_cwd)).expanduser().resolve()
                 if raw_session_store_cwd
@@ -556,13 +571,9 @@ class SlashCommandHandler:
             return
         from fast_agent.session import extract_session_title, get_session_manager
 
-        raw_session_store_scope = getattr(
-            self._acp_context,
-            "session_store_scope",
-            "workspace",
+        raw_session_cwd, raw_session_store_scope, raw_session_store_cwd = (
+            self._resolve_acp_session_metadata()
         )
-        raw_session_store_cwd = getattr(self._acp_context, "session_store_cwd", None)
-        raw_session_cwd = getattr(self._acp_context, "session_cwd", None)
         if raw_session_store_scope == "app":
             manager = get_session_manager()
         elif raw_session_store_cwd:

@@ -1210,10 +1210,42 @@ class LoggerSettings(BaseModel):
     """Emit OSC 133 prompt marks for terminals that support scrollbar markers."""
     streaming: Literal["markdown", "plain", "none"] = "markdown"
     """Streaming renderer for assistant responses"""
+    theme_file: str | None = None
+    """Optional Rich theme file for console styles. Relative paths resolve from fastagent.config.yaml."""
+    code_theme: str = "native"
+    """Pygments / Rich syntax theme for fenced code blocks and markdown code rendering."""
     render_fences_with_syntax: bool = True
     """Render assistant markdown code fences with Rich Syntax instead of markdown fence blocks"""
     code_word_wrap: bool = False
     """Wrap Syntax-rendered code blocks instead of cropping at the viewport edge"""
+    apply_patch_preview_max_lines: int | None = Field(
+        default=120,
+        description=(
+            "Maximum lines to show in apply_patch previews before appending "
+            "'(+N more lines)' (0/None = no limit)"
+        ),
+    )
+    """Maximum lines to show in apply_patch previews before truncation"""
+
+    _theme_file_config_path: str | None = PrivateAttr(default=None)
+
+    @field_validator("apply_patch_preview_max_lines", mode="before")
+    @classmethod
+    def _coerce_apply_patch_preview_max_lines(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped == "" or stripped.lower() in {"none", "null", "all", "unlimited"}:
+                return None
+            value = int(stripped)
+        else:
+            value = int(value)
+        if value == 0:
+            return None
+        if value < 0:
+            raise ValueError("apply_patch_preview_max_lines must be non-negative.")
+        return value
 
 
 def find_fastagent_config_files(start_path: Path) -> tuple[Path | None, Path | None]:
@@ -1356,6 +1388,21 @@ def find_project_config_file(start_path: Path) -> Path | None:
     return None
 
 
+def _find_parent_file(start_path: Path, filename: str) -> Path | None:
+    current = start_path.resolve().parent
+    while current != current.parent:
+        candidate = current / filename
+        if candidate.exists():
+            return candidate
+        current = current.parent
+    return None
+
+
+def find_legacy_project_config_file(start_path: Path) -> Path | None:
+    """Find a parent-directory ``fastagent.config.yaml``, excluding ``start_path`` itself."""
+    return _find_parent_file(start_path, "fastagent.config.yaml")
+
+
 def resolve_environment_config_file(
     start_path: Path,
     *,
@@ -1375,23 +1422,61 @@ def resolve_environment_config_file(
     return env_root / "fastagent.config.yaml"
 
 
+def resolve_implicit_config_file(
+    start_path: Path,
+    *,
+    env_dir: str | Path | None = None,
+) -> Path | None:
+    """Resolve the active implicit config file using env, cwd, then legacy order."""
+    env_config = resolve_environment_config_file(start_path, env_dir=env_dir)
+    if env_config.exists():
+        return env_config
+
+    cwd_config = start_path.resolve() / "fastagent.config.yaml"
+    if cwd_config.exists():
+        return cwd_config
+
+    return find_legacy_project_config_file(start_path)
+
+
+def resolve_implicit_secrets_file(
+    start_path: Path,
+    *,
+    env_dir: str | Path | None = None,
+) -> Path | None:
+    """Resolve the active implicit secrets file using env, cwd, then legacy order."""
+    env_secrets = resolve_environment_config_file(start_path, env_dir=env_dir).with_name(
+        "fastagent.secrets.yaml"
+    )
+    if env_secrets.exists():
+        return env_secrets
+
+    cwd_secrets = start_path.resolve() / "fastagent.secrets.yaml"
+    if cwd_secrets.exists():
+        return cwd_secrets
+
+    return _find_parent_file(start_path, "fastagent.secrets.yaml")
+
+
+def load_implicit_settings(
+    *,
+    start_path: Path,
+    env_dir: str | Path | None = None,
+) -> tuple[dict[str, Any], Path | None]:
+    """Load settings from the first implicit config found: env, cwd, then legacy."""
+    config_path = resolve_implicit_config_file(start_path, env_dir=env_dir)
+    if config_path is None or not config_path.exists():
+        return {}, None
+    return load_yaml_mapping(config_path), config_path
+
+
 def resolve_layered_config_file(
     start_path: Path,
     *,
     env_dir: str | Path | None = None,
 ) -> Path | None:
-    """Return the effective config path using project + env precedence.
-
-    Precedence is project config first, then environment config overlay when
-    the env config file exists.
-    """
-
-    project_config = find_project_config_file(start_path)
-    env_config = resolve_environment_config_file(start_path, env_dir=env_dir)
-
-    if env_config.exists():
-        return env_config
-    return project_config
+    """Return the implicit config path using env, cwd, then legacy precedence."""
+    return resolve_implicit_config_file(start_path, env_dir=env_dir)
 
 
 def load_layered_settings(
@@ -1446,6 +1531,16 @@ def load_layered_model_settings(
         layered["model_references"] = layered_settings["model_references"]
 
     return layered
+
+
+def _lookup_nested_mapping_value(mapping: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    """Return whether a nested mapping path exists plus its value."""
+    current: Any = mapping
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False, None
+        current = current[key]
+    return True, current
 
 
 class Settings(BaseSettings):
@@ -1647,6 +1742,7 @@ def get_settings(config_path: str | os.PathLike[str] | None = None) -> Settings:
     config_file: Path | None
     secrets_file: Path | None
     merged_settings: dict[str, Any]
+    config_sources: list[tuple[Path, dict[str, Any]]] = []
     if config_path:
         config_file = Path(config_path)
         # If it's a relative path and doesn't exist, try finding it
@@ -1665,15 +1761,21 @@ def get_settings(config_path: str | os.PathLike[str] | None = None) -> Settings:
         # Load main config if it exists
         if config_file and config_file.exists():
             merged_settings = load_yaml_mapping(config_file)
+            config_sources.append((config_file, merged_settings))
         elif config_file and not config_file.exists():
             print(f"Warning: Specified config file does not exist: {config_file}")
     else:
-        # Use standardized discovery for secrets and layered loading for config.
-        search_root = resolve_config_search_root(Path.cwd())
-        _, secrets_file = find_fastagent_config_files(search_root)
-        merged_settings, config_file = load_layered_settings(
+        # Implicit discovery prefers env-specific config, then cwd, then parent fallback.
+        env_override = os.getenv("ENVIRONMENT_DIR")
+        merged_settings, config_file = load_implicit_settings(
             start_path=Path.cwd(),
-            env_dir=os.getenv("ENVIRONMENT_DIR"),
+            env_dir=env_override,
+        )
+        if config_file and config_file.exists():
+            config_sources.append((config_file, merged_settings))
+        secrets_file = resolve_implicit_secrets_file(
+            Path.cwd(),
+            env_dir=env_override,
         )
 
     # Load secrets file if found (regardless of whether config file exists)
@@ -1702,6 +1804,16 @@ def get_settings(config_path: str | os.PathLike[str] | None = None) -> Settings:
     _settings = Settings(**merged_settings)
     _settings._config_file = str(config_file) if config_file else None
     _settings._secrets_file = str(secrets_file) if secrets_file else None
+    current_theme_file = getattr(_settings.logger, "theme_file", None)
+    if current_theme_file is not None:
+        for source_path, source_mapping in reversed(config_sources):
+            found, source_value = _lookup_nested_mapping_value(
+                source_mapping,
+                ("logger", "theme_file"),
+            )
+            if found and source_value == current_theme_file:
+                _settings.logger._theme_file_config_path = str(source_path)
+                break
     return _settings
 
 

@@ -9,6 +9,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Collection,
     Literal,
     Mapping,
     Protocol,
@@ -36,18 +37,23 @@ if TYPE_CHECKING:
     from fast_agent.acp.acp_aware_mixin import ACPCommand, ACPModeInfo
     from fast_agent.acp.acp_context import ACPContext
     from fast_agent.agents.agent_types import AgentConfig, AgentType
-    from fast_agent.agents.tool_runner import ToolRunnerHooks
+    from fast_agent.agents.tool_runner import HistoryRollbackState, ToolRunnerHooks
     from fast_agent.context import Context
     from fast_agent.llm.model_info import ModelInfo
     from fast_agent.llm.resolved_model import ResolvedModelSpec
 
 __all__ = [
     "FastAgentLLMProtocol",
+    "LlmCapableProtocol",
     "StreamingAgentProtocol",
     "LlmAgentProtocol",
     "MessageHistoryAgentProtocol",
     "AgentProtocol",
+    "AgentBackedToolProvider",
+    "CardToolProvider",
+    "SmartToolingCapable",
     "ToolRunnerHookCapable",
+    "TurnCancellationStateCapable",
     "ACPAwareProtocol",
     "LLMFactoryProtocol",
     "ModelFactoryFunctionProtocol",
@@ -187,11 +193,16 @@ class FastAgentLLMProtocol(Protocol):
 
 
 @runtime_checkable
-class LlmAgentProtocol(Protocol):
-    """Protocol defining the minimal interface for LLM agents."""
+class LlmCapableProtocol(Protocol):
+    """Protocol for objects exposing a public attached LLM."""
 
     @property
     def llm(self) -> FastAgentLLMProtocol | None: ...
+
+
+@runtime_checkable
+class LlmAgentProtocol(LlmCapableProtocol, Protocol):
+    """Protocol defining the minimal interface for LLM agents."""
 
     @property
     def name(self) -> str: ...
@@ -343,6 +354,39 @@ class AgentProtocol(LlmAgentProtocol, Protocol):
 
 
 @runtime_checkable
+class AgentBackedToolProvider(Protocol):
+    """Optional capability for agents exposing other agents as tools."""
+
+    @property
+    def agent_backed_tools(self) -> Mapping[str, LlmAgentProtocol]: ...
+
+
+@runtime_checkable
+class CardToolProvider(Protocol):
+    """Optional capability for agents exposing card-sourced tool names."""
+
+    @property
+    def card_tool_names(self) -> Collection[str]: ...
+
+
+@runtime_checkable
+class SmartToolingCapable(Protocol):
+    """Optional capability for agents exposing smart-tool metadata/state."""
+
+    @property
+    def smart_tool_names(self) -> Collection[str]: ...
+
+    @smart_tool_names.setter
+    def smart_tool_names(self, value: Collection[str]) -> None: ...
+
+    @property
+    def parallel_smart_tool_calls(self) -> bool: ...
+
+    @parallel_smart_tool_calls.setter
+    def parallel_smart_tool_calls(self, value: bool) -> None: ...
+
+
+@runtime_checkable
 class ToolRunnerHookCapable(Protocol):
     """Optional capability for agents to expose ToolRunner hooks."""
 
@@ -351,6 +395,29 @@ class ToolRunnerHookCapable(Protocol):
 
     @tool_runner_hooks.setter
     def tool_runner_hooks(self, value: "ToolRunnerHooks | None") -> None: ...
+
+
+@runtime_checkable
+class TurnCancellationStateCapable(Protocol):
+    """Optional capability for agents to expose last-turn cancellation state."""
+
+    @property
+    def last_turn_cancelled(self) -> bool: ...
+
+    @property
+    def last_turn_cancel_reason(self) -> str: ...
+
+    @property
+    def last_turn_history_state(self) -> "HistoryRollbackState | None": ...
+
+    def record_last_turn_cancellation(
+        self,
+        *,
+        reason: str,
+        rollback_state: "HistoryRollbackState",
+    ) -> None: ...
+
+    def clear_last_turn_cancellation(self) -> None: ...
 
 
 @runtime_checkable

@@ -38,7 +38,6 @@ class SessionStoreHost(Protocol):
     _session_state: dict[str, ACPSessionState]
     sessions: dict[str, Any]
     _prompt_locks: dict[str, Any]
-    primary_instance: Any
     _dispose_instance_task: Any
 
     def _resolve_request_cwd(
@@ -108,7 +107,7 @@ class ACPServerSessionStore:
     ) -> list[UserMessageChunk | AgentMessageChunk]:
         updates: list[UserMessageChunk | AgentMessageChunk] = []
         for message in history:
-            role_value = message.role.value if hasattr(message.role, "value") else str(message.role)
+            role_value = str(message.role)
             if role_value == "user":
                 update_builder = update_user_message
             elif role_value == "assistant":
@@ -153,7 +152,7 @@ class ACPServerSessionStore:
             if not agent:
                 return
 
-            history = list(getattr(agent, "message_history", []))
+            history = list(agent.message_history)
             if not history:
                 return
 
@@ -321,8 +320,7 @@ class ACPServerSessionStore:
                     self._host.sessions.pop(session_id, None)
                     self._host._session_state.pop(session_id, None)
                     self._host._prompt_locks.pop(session_id, None)
-                if session_state.instance != self._host.primary_instance:
-                    await self._host._dispose_instance_task(session_state.instance)
+                await self._host._dispose_instance_task(session_state.instance)
             self._raise_session_not_found(session_id=session_id, request_cwd=request_cwd)
 
         session = result.session
@@ -359,13 +357,13 @@ class ACPServerSessionStore:
             if session_state.acp_context:
                 session_state.acp_context.set_current_mode(current_agent)
 
-        if current_agent and current_agent != session_modes.currentModeId:
+        if current_agent and current_agent != session_modes.current_mode_id:
             session_modes = SessionModeState(
-                available_modes=session_modes.availableModes,
+                available_modes=session_modes.available_modes,
                 current_mode_id=current_agent,
             )
             if session_state.acp_context:
-                session_state.acp_context.set_available_modes(session_modes.availableModes)
+                session_state.acp_context.set_available_modes(session_modes.available_modes)
                 session_state.acp_context.set_current_mode(current_agent)
 
         if self._host._connection:
