@@ -23,6 +23,7 @@ from fast_agent.constants import DEFAULT_ENVIRONMENT_DIR
 from fast_agent.core.exceptions import ConfigFileError
 from fast_agent.llm.reasoning_effort import ReasoningEffortSetting
 from fast_agent.llm.structured_output_mode import StructuredOutputMode
+from fast_agent.llm.task_budget import parse_task_budget_tokens, validate_task_budget_tokens
 from fast_agent.llm.text_verbosity import TextVerbosityLevel
 from fast_agent.mcp.provider_management import (
     normalize_access_token,
@@ -39,8 +40,9 @@ class MCPServerAuthSettings(BaseModel):
     Minimal OAuth v2.1 support with sensible defaults.
     """
 
-    # Enable OAuth for SSE/HTTP transports. If None is provided for the auth block,
-    # the system will assume OAuth is enabled by default.
+    # Enable OAuth for SSE/HTTP transports when the auth block is present.
+    # If the auth block is omitted entirely, fast-agent starts unauthenticated
+    # and escalates to OAuth on a 401 challenge.
     oauth: bool = True
 
     # Local callback server configuration
@@ -818,6 +820,13 @@ class AnthropicSettings(BaseModel):
             "(int), or toggle (bool). Use 0 or false to disable."
         ),
     )
+    task_budget: int | str | None = Field(
+        default=None,
+        description=(
+            "Anthropic task budget for agentic loops. Supports raw token counts or shorthand "
+            "like 20k/128k. Use off/default to disable."
+        ),
+    )
     structured_output_mode: StructuredOutputMode | Literal["auto"] = Field(
         default="auto",
         description="Structured output mode: auto, json, or tool_use",
@@ -827,6 +836,18 @@ class AnthropicSettings(BaseModel):
     web_fetch: AnthropicWebFetchSettings = Field(default_factory=AnthropicWebFetchSettings)
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+    @field_validator("task_budget", mode="before")
+    @classmethod
+    def _coerce_task_budget(cls, value: Any) -> int | None | Any:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return validate_task_budget_tokens(value)
+        if isinstance(value, str):
+            parsed = parse_task_budget_tokens(value)
+            return validate_task_budget_tokens(parsed)
+        return value
 
 
 class OpenAIUserLocationSettings(BaseModel):
@@ -1224,6 +1245,8 @@ class LoggerSettings(BaseModel):
 
     show_chat: bool = True
     """Show chat User/Assistant on the console"""
+    stream_reprint_banner: bool = True
+    """Show a bright banner before reprinted final streamed assistant responses"""
     show_tools: bool = True
     """Show MCP Sever tool calls on the console"""
     truncate_tools: bool = True

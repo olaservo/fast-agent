@@ -187,6 +187,14 @@ class FastAgentLLMProtocol(Protocol):
     @property
     def web_fetch_enabled(self) -> bool: ...
 
+    def set_task_budget_tokens(self, value: int | None) -> None: ...
+
+    @property
+    def task_budget_supported(self) -> bool: ...
+
+    @property
+    def task_budget_tokens(self) -> int | None: ...
+
     def set_service_tier(self, value: Literal["fast", "flex"] | None) -> None: ...
 
     @property
@@ -352,6 +360,7 @@ class AgentProtocol(LlmAgentProtocol, Protocol):
         render_markdown: bool | None = None,
         show_hook_indicator: bool | None = None,
         render_message: bool = True,
+        show_reprint_banner: bool = False,
     ) -> None: ...
 
     async def attach_llm(

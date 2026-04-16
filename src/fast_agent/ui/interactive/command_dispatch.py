@@ -51,6 +51,7 @@ from fast_agent.ui.command_payloads import (
     ModelReasoningCommand,
     ModelsCommand,
     ModelSwitchCommand,
+    ModelTaskBudgetCommand,
     ModelVerbosityCommand,
     ModelWebFetchCommand,
     ModelWebSearchCommand,
@@ -551,6 +552,15 @@ async def _dispatch_model_payload(
             )
             await emit_command_outcome(context, outcome)
             return result
+        case ModelTaskBudgetCommand(value=value):
+            context = build_command_context(prompt_provider, agent)
+            outcome = await model_handlers.handle_model_task_budget(
+                context,
+                agent_name=agent,
+                value=value,
+            )
+            await emit_command_outcome(context, outcome)
+            return result
         case ModelVerbosityCommand(value=value):
             context = build_command_context(prompt_provider, agent)
             outcome = await model_handlers.handle_model_verbosity(
@@ -675,6 +685,26 @@ def _refresh_available_agents(
     return next_available_agents, next_available_agents_set
 
 
+def _apply_refresh_preferences(
+    *,
+    prompt_provider: "AgentApp",
+    current_agent: str,
+    next_available_agents: list[str],
+    next_available_agents_set: set[str],
+) -> str | None:
+    refresh_result = prompt_provider.latest_refresh_result()
+    for warning in refresh_result.warnings:
+        rich_print(f"[yellow]{warning}[/yellow]")
+    preferred_agent = refresh_result.active_agent
+    if preferred_agent and preferred_agent in next_available_agents_set:
+        return preferred_agent
+    if current_agent in next_available_agents_set:
+        return None
+    if next_available_agents:
+        return next_available_agents[0]
+    return None
+
+
 async def _dispatch_agent_card_payload(
     owner: "InteractivePrompt",
     payload: CommandPayload,
@@ -767,12 +797,17 @@ async def _dispatch_reload_payload(
                 )
                 result.available_agents = next_available_agents
                 result.available_agents_set = next_available_agents_set
-                if agent not in next_available_agents_set:
-                    if next_available_agents:
-                        result.next_agent = next_available_agents[0]
-                    else:
-                        rich_print("[red]No agents available after reload.[/red]")
-                        result.should_return = True
+                next_agent = _apply_refresh_preferences(
+                    prompt_provider=prompt_provider,
+                    current_agent=agent,
+                    next_available_agents=next_available_agents,
+                    next_available_agents_set=next_available_agents_set,
+                )
+                if next_agent is not None:
+                    result.next_agent = next_agent
+                elif not next_available_agents:
+                    rich_print("[red]No agents available after reload.[/red]")
+                    result.should_return = True
             return result
         case _:
             return None
