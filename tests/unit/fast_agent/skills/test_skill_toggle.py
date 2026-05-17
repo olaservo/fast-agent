@@ -47,18 +47,37 @@ def _mcp_manifest(name: str, server: str = "github") -> SkillManifest:
 # --- provenance rendering ------------------------------------------------
 
 
-def test_format_emits_filesystem_source(tmp_path: Path) -> None:
+def test_format_omits_source_for_filesystem_skills(tmp_path: Path) -> None:
+    """Filesystem skills carry no <source> — the absence is the trust
+    signal (user-installed), symmetric with the unwrapped read-time
+    content. SEP-2640's SHOULD on server attribution only applies to
+    MCP-served skills."""
     m = _fs_manifest(tmp_path, "alpha")
     out = format_skills_for_prompt([m])
-    assert "<source>filesystem:" in out
-    # Source line includes the skill's directory.
+    assert "<source>" not in out
+    # <directory> still names where the skill lives.
     assert str(tmp_path / "alpha") in out
 
 
 def test_format_emits_mcp_server_source() -> None:
     m = _mcp_manifest("git-workflow", server="github")
     out = format_skills_for_prompt([m])
-    assert "<source>mcp-server: github</source>" in out
+    # Bare server name — no "mcp-server:" prefix. The element only
+    # exists on MCP-served skills, so the prefix would be redundant.
+    assert "<source>github</source>" in out
+
+
+def test_format_mixed_skills_only_mcp_carries_source(tmp_path: Path) -> None:
+    """In a mixed listing the source element appears exactly once —
+    on the MCP skill block — so the model can read the convention
+    correctly from a single example. Preamble disabled so the count
+    reflects the rendered skill blocks, not the prose that names
+    `<source>` as part of its explanation."""
+    fs = _fs_manifest(tmp_path, "alpha")
+    mcp = _mcp_manifest("beta", server="github")
+    out = format_skills_for_prompt([fs, mcp], include_preamble=False)
+    assert out.count("<source>") == 1
+    assert "<source>github</source>" in out
 
 
 def test_format_filters_disabled_skills(tmp_path: Path) -> None:

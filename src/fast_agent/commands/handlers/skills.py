@@ -1243,6 +1243,178 @@ async def handle_enable_skill(
     return outcome
 
 
+async def handle_pending_skill_servers(
+    ctx: CommandContext,
+    *,
+    agent_name: str,
+) -> CommandOutcome:
+    """List MCP servers whose skill catalogs are awaiting user approval.
+
+    Pending catalogs are NOT in the model's context until the user runs
+    `/skills approve <server>`. This lists what's been advertised but
+    held aside, so the user can review names/descriptions before
+    consenting.
+    """
+    outcome = CommandOutcome()
+    agent_obj = ctx.agent_provider._agent(agent_name)
+    if not hasattr(agent_obj, "pending_skill_servers"):
+        outcome.add_message(
+            "This agent does not support skill consent gates.",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    pending = agent_obj.pending_skill_servers()
+    if not pending:
+        outcome.add_message(
+            "No MCP servers are awaiting skill approval.",
+            channel="info",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    content = Text()
+    append_heading(content, "Skill catalogs awaiting approval")
+    for server_name in sorted(pending):
+        manifests = pending[server_name]
+        header = Text()
+        header.append("server: ", style="dim")
+        header.append(server_name, style="bright_blue bold")
+        header.append(f"  ({len(manifests)} skill(s))", style="dim")
+        content.append_text(header)
+        content.append("\n")
+        for manifest in manifests:
+            entry = Text()
+            entry.append("  · ", style="dim cyan")
+            entry.append(manifest.name, style="bright_blue")
+            if manifest.description:
+                entry.append("  — ", style="dim")
+                entry.append(manifest.description, style="dim")
+            content.append_text(entry)
+            content.append("\n")
+        content.append("\n")
+    content.append(
+        "Approve with `/skills approve <server>` or revoke with `/skills revoke <server>`.",
+        style="dim",
+    )
+
+    outcome.add_message(
+        content,
+        channel="info",
+        right_info="skills",
+        agent_name=agent_name,
+    )
+    return outcome
+
+
+async def handle_approve_skill_server(
+    ctx: CommandContext,
+    *,
+    agent_name: str,
+    argument: str | None,
+) -> CommandOutcome:
+    outcome = CommandOutcome()
+    if not argument or not argument.strip():
+        outcome.add_message(
+            "Usage: /skills approve <server>",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    server = argument.strip()
+    agent_obj = ctx.agent_provider._agent(agent_name)
+    if not hasattr(agent_obj, "approve_skill_server"):
+        outcome.add_message(
+            "This agent does not support skill consent gates.",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    changed = agent_obj.approve_skill_server(server)
+    if not changed:
+        outcome.add_message(
+            (
+                f"No skill catalog from '{server}' is pending. "
+                "Run `/skills pending` to see what's awaiting approval."
+            ),
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    outcome.add_message(
+        f"Approved skills from MCP server: {server}",
+        channel="info",
+        right_info="skills",
+        agent_name=agent_name,
+    )
+    outcome.add_message(
+        (
+            "Note: the system prompt currently in the model's context does "
+            "not include the newly approved skills; they will appear on the "
+            "next prompt build. Consent is persisted across sessions."
+        ),
+        channel="info",
+        right_info="skills",
+        agent_name=agent_name,
+    )
+    return outcome
+
+
+async def handle_revoke_skill_server(
+    ctx: CommandContext,
+    *,
+    agent_name: str,
+    argument: str | None,
+) -> CommandOutcome:
+    outcome = CommandOutcome()
+    if not argument or not argument.strip():
+        outcome.add_message(
+            "Usage: /skills revoke <server>",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    server = argument.strip()
+    agent_obj = ctx.agent_provider._agent(agent_name)
+    if not hasattr(agent_obj, "revoke_skill_server"):
+        outcome.add_message(
+            "This agent does not support skill consent gates.",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    changed = agent_obj.revoke_skill_server(server)
+    if not changed:
+        outcome.add_message(
+            f"No active or pending consent for MCP server: {server}",
+            channel="warning",
+            right_info="skills",
+            agent_name=agent_name,
+        )
+        return outcome
+
+    outcome.add_message(
+        f"Revoked consent for MCP server: {server}",
+        channel="info",
+        right_info="skills",
+        agent_name=agent_name,
+    )
+    return outcome
+
+
 async def handle_skills_command(
     ctx: CommandContext,
     *,
@@ -1300,13 +1472,23 @@ async def handle_skills_command(
         return await handle_preview_skill(
             ctx, agent_name=agent_name, argument=argument
         )
+    if normalized in {"pending"}:
+        return await handle_pending_skill_servers(ctx, agent_name=agent_name)
+    if normalized in {"approve"}:
+        return await handle_approve_skill_server(
+            ctx, agent_name=agent_name, argument=argument
+        )
+    if normalized in {"revoke"}:
+        return await handle_revoke_skill_server(
+            ctx, agent_name=agent_name, argument=argument
+        )
 
     outcome = CommandOutcome()
     outcome.add_message(
         (
             f"Unknown /skills action: {normalized}. "
             "Use list/available/search/add/remove/update/registry/"
-            "templates/resolve/enable/disable/preview/help."
+            "templates/resolve/enable/disable/preview/pending/approve/revoke/help."
         ),
         channel="warning",
         right_info="skills",

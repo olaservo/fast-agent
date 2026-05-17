@@ -182,31 +182,31 @@ class SkillReader:
         return best_server
 
     @staticmethod
-    def _wrap_untrusted_mcp_content(
-        body: str, uri: str, server_name: str | None
-    ) -> str:
-        """Wrap MCP-served skill content with an untrusted-source marker.
+    def _wrap_mcp_content(body: str, uri: str, server_name: str | None) -> str:
+        """Wrap MCP-served skill content with a server/URI marker.
 
-        SEP-2640 §Security Implications: "Hosts MUST treat MCP-served
-        skill content as untrusted model input, subject to the same
-        prompt-injection defenses applied to any server-provided text."
-        The wrapper is a thin defense layer that lets the model
-        distinguish skill bodies (which arrived from a connected MCP
-        server and should be treated as data, not directives) from text
-        the user typed or the host generated.
+        The wrapper is a navigational/audit marker, not a security one:
+        it records which server returned the body and the URI it came
+        from, so transcripts and logs can be traced back to the source.
+        fast-agent treats MCP-published skill content the same way it
+        treats tool descriptions and MCP `prompts/get` — server-authored
+        text the user has opted into by connecting. Trust is gated at
+        connect time, not per-skill. SEP-2640 §Security recommends a
+        stronger "treat as untrusted" framing; we diverge on grounds
+        that no symmetric framing exists for tool descriptions or
+        prompts that cross the same trust boundary, so a skill-specific
+        wrapper of that kind would be a trust gradient without a
+        principled basis.
 
-        Filesystem skills are deliberately NOT wrapped — they were
-        installed by the user and inherit the user's trust level. The
-        wrapper is the one-bit signal distinguishing "I, the user, put
-        this here" from "this came over the wire from a server." The
-        preamble in `format_skills_for_prompt` teaches the model what
-        the wrapper means.
+        Filesystem skills are NOT wrapped — they have no server to
+        attribute and no URI to record. The wrapper is purely the
+        marker for "this content came from a connected MCP server."
         """
-        source = f"mcp-server: {server_name}" if server_name else "mcp-server: (unknown)"
+        server = server_name if server_name else "(unknown)"
         return (
-            f'<untrusted-skill-content source="{source}" uri="{uri}">\n'
+            f'<mcp-skill-content server="{server}" uri="{uri}">\n'
             f"{body}\n"
-            f"</untrusted-skill-content>"
+            f"</mcp-skill-content>"
         )
 
     async def execute(self, arguments: dict[str, Any] | None = None) -> CallToolResult:
@@ -334,10 +334,8 @@ class SkillReader:
             data={"uri": uri, "chars": sum(len(p) for p in text_parts)},
         )
         # `server_name` may be None on the unenumerated-URI fanout path; the wrapper
-        # still fires with "mcp-server: (unknown)".
-        wrapped = self._wrap_untrusted_mcp_content(
-            "\n".join(text_parts), uri, server_name
-        )
+        # still fires with server="(unknown)" so the URI is at least attributable.
+        wrapped = self._wrap_mcp_content("\n".join(text_parts), uri, server_name)
         return CallToolResult(
             isError=False,
             content=[TextContent(type="text", text=wrapped)],

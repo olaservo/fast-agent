@@ -432,6 +432,15 @@ class MCPServerSettings(BaseModel):
     Skills-over-MCP discovery — set `mcp_skills: false` separately if you
     want that too."""
 
+    skills_auto_approve: bool = False
+    """Whether to auto-approve this server's skill catalog without prompting
+    the user (default: False). When False, discovered skills are held aside
+    on first connect (and on any subsequent catalog change) until the user
+    runs `/skills approve <server>`; this is the safe default for
+    interactive use. Set True for headless/CI workflows where the operator
+    has pre-vetted the server out-of-band and a prompt would block startup.
+    Has no effect if `mcp_skills` is False (no discovery happens at all)."""
+
     reconnect_on_disconnect: bool = True
     """Whether to automatically reconnect when the server session is terminated (e.g., 404).
 

@@ -1,9 +1,12 @@
-"""Tests for the SEP-2640 untrusted-content wrapper on MCP skill reads.
+"""Tests for the `<mcp-skill-content>` wrapper on MCP skill reads.
 
-SEP §Security Implications: "Hosts MUST treat MCP-served skill content
-as untrusted model input." The wrapper is the host's signal to the
-model that wrapped content arrived from a connected server and should
-be treated as data, not directives.
+The wrapper is a navigational/audit marker: it records which server
+returned the body and the URI it came from, so transcripts and logs
+can be traced back to source. SEP-2640 recommends a stronger "treat
+as untrusted" framing; this host diverges and treats MCP skill
+content the same way it treats tool descriptions and MCP
+`prompts/get` — server-authored text gated at connect time, not
+per-skill. The wrapper carries no security framing for the model.
 """
 
 from __future__ import annotations
@@ -56,7 +59,7 @@ def _fake_aggregator(responses: dict[str, ReadResourceResult | Exception]) -> An
 
 
 @pytest.mark.asyncio
-async def test_aggregator_read_is_wrapped_with_source_marker() -> None:
+async def test_aggregator_read_is_wrapped_with_server_and_uri() -> None:
     manifest = _mcp_manifest("git-workflow", server="github")
     agg = _fake_aggregator(
         {"skill://git-workflow/SKILL.md": _text_result("# body", "skill://git-workflow/SKILL.md")}
@@ -67,20 +70,20 @@ async def test_aggregator_read_is_wrapped_with_source_marker() -> None:
 
     assert not result.isError
     text = result.content[0].text
-    # The wrapper opens with a tag identifying the source and URI, and
-    # closes with the matching close tag. The body sits between.
+    # Wrapper records server name and source URI for transcripts/audit.
+    # Bare server name — element name already conveys "MCP-served."
     assert text.startswith(
-        '<untrusted-skill-content source="mcp-server: github" '
+        '<mcp-skill-content server="github" '
         'uri="skill://git-workflow/SKILL.md">'
     )
     assert "# body" in text
-    assert text.rstrip().endswith("</untrusted-skill-content>")
+    assert text.rstrip().endswith("</mcp-skill-content>")
 
 
 @pytest.mark.asyncio
 async def test_unenumerated_uri_wraps_with_unknown_server() -> None:
     """The unenumerated `skill://` fanout path doesn't know which server
-    answered. The wrapper still fires, marking source as `(unknown)` —
+    answered. The wrapper still fires, marking the server as `(unknown)` —
     a strictly weaker but still-honest attribution. Critically, the
     wrapper is *not* skipped just because we lack a name."""
     agg = _fake_aggregator(
@@ -92,7 +95,7 @@ async def test_unenumerated_uri_wraps_with_unknown_server() -> None:
 
     assert not result.isError
     text = result.content[0].text
-    assert 'source="mcp-server: (unknown)"' in text
+    assert 'server="(unknown)"' in text
     assert "# body" in text
 
 
@@ -101,10 +104,10 @@ async def test_unenumerated_uri_wraps_with_unknown_server() -> None:
 
 @pytest.mark.asyncio
 async def test_filesystem_read_is_not_wrapped(tmp_path: Path) -> None:
-    """Filesystem skills are presumed user-installed and inherit the
-    user's trust. The wrapper exists to flag the *server* boundary; a
-    filesystem skill doesn't cross one. Leaving filesystem reads unwrapped
-    keeps the wrapper a precise signal rather than ambient noise."""
+    """Filesystem skills have no server to attribute and no source URI
+    to record, so the wrapper has nothing to mark. Leaving filesystem
+    reads unwrapped keeps the wrapper a precise marker for the MCP
+    boundary rather than ambient noise."""
     skill_dir = tmp_path / "alpha"
     skill_dir.mkdir()
     md = skill_dir / "SKILL.md"
@@ -116,31 +119,51 @@ async def test_filesystem_read_is_not_wrapped(tmp_path: Path) -> None:
 
     assert not result.isError
     text = result.content[0].text
-    assert "untrusted-skill-content" not in text
+    assert "mcp-skill-content" not in text
     assert "# alpha body" in text
 
 
-# --- Preamble teaches the model what the wrapper means -------------------
+# --- Preamble does NOT lecture the model about the wrapper ---------------
 
 
-def test_preamble_explains_wrapper_when_mcp_skill_present() -> None:
+def test_preamble_does_not_lecture_on_trust() -> None:
+    """The wrapper is an audit/navigation marker, not a security
+    instruction. The preamble must not coach the model to distrust
+    wrapped content — that framing would create a trust gradient
+    between MCP skills and tool descriptions/prompts (which cross the
+    same trust boundary unannotated)."""
     manifest = _mcp_manifest("git-workflow", server="github")
     out = format_skills_for_prompt([manifest])
-    # The preamble must mention both the tag and what the model should
-    # do with wrapped content.
-    assert "<untrusted-skill-content" in out
-    assert "untrusted" in out.lower()
-    # The "treat as data, not directive" framing must be present in
-    # some form — otherwise the wrapper is just decoration.
-    assert "reference material" in out or "not as authoritative" in out
+    lowered = out.lower()
+    # No alarm words anywhere in the preamble.
+    assert "untrusted" not in lowered
+    assert "not as authoritative" not in lowered
+    assert "reference material" not in lowered
+    # Mechanical guidance about URI handling is still expected — the
+    # preamble must teach the model HOW to read MCP-served skills,
+    # just not lecture about whether to trust them.
+    assert "uri" in lowered
+    assert "skill://" in out
 
 
-def test_preamble_omits_wrapper_guidance_when_only_filesystem_skills(tmp_path: Path) -> None:
-    """If no MCP skill is present, the wrapper guidance is dead weight —
-    don't include it. Symmetric with the existing has_mcp_skill flag."""
+def test_preamble_mentions_source_element_when_mcp_skill_present() -> None:
+    """SEP-2640 SHOULD: hosts indicate which server an MCP-served skill
+    came from. The preamble points the model at the `<source>` element
+    so it can do that without prose lecturing."""
+    manifest = _mcp_manifest("git-workflow", server="github")
+    out = format_skills_for_prompt([manifest])
+    assert "<source>" in out
+
+
+def test_preamble_omits_mcp_guidance_when_only_filesystem_skills(tmp_path: Path) -> None:
+    """If no MCP skill is present, the URI/source guidance is dead
+    weight — don't include it. Symmetric with the existing
+    has_mcp_skill flag."""
     md = tmp_path / "alpha" / "SKILL.md"
     md.parent.mkdir(parents=True)
     md.write_text("---\nname: alpha\ndescription: x\n---\nbody\n", encoding="utf-8")
     manifest = SkillManifest(name="alpha", description="x", body="b", path=md)
     out = format_skills_for_prompt([manifest])
-    assert "untrusted-skill-content" not in out
+    assert "mcp-skill-content" not in out
+    assert "skill://" not in out
+    assert "<source>" not in out

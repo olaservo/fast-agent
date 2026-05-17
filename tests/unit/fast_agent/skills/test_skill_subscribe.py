@@ -25,8 +25,31 @@ from pydantic import AnyUrl
 
 from fast_agent.agents.agent_types import AgentConfig
 from fast_agent.agents.mcp_agent import McpAgent
+from fast_agent.config import MCPServerSettings
 from fast_agent.context import Context
 from fast_agent.mcp.mcp_skills_loader import INDEX_URI
+
+
+def _auto_approve_server(
+    agent: McpAgent, server_name: str, *, home: Path
+) -> None:
+    """Configure `server_name` to auto-approve its skill catalog and
+    point the consent store at a hermetic tmp directory.
+
+    These tests exercise the refresh path's mechanics, not the consent
+    gate (which has its own tests). Auto-approve writes consent
+    through on every encounter so a catalog change doesn't drop the
+    refreshed manifests back into pending. Isolating the home keeps
+    the consent file out of the user's real fast-agent home.
+    """
+    if agent._context.config is None:
+        from fast_agent.config import Settings
+
+        agent._context.config = Settings()
+    agent._context.config._fast_agent_home = str(home)
+    agent._context.config.mcp.servers[server_name] = MCPServerSettings(
+        skills_auto_approve=True
+    )
 
 
 def _text_result(text: str, uri: str, mime: str = "application/json") -> ReadResourceResult:
@@ -105,6 +128,7 @@ async def test_refresh_adds_new_skill_after_index_update(tmp_path: Path) -> None
     config = AgentConfig(name="test", instruction="x", servers=[], skills=None)
     agent = McpAgent(config=config, context=Context())
     agent._aggregator = agg
+    _auto_approve_server(agent, "srv", home=tmp_path)
 
     # Initial load: only "alpha".
     await agent._refresh_skills_after_index_update("srv")
@@ -128,6 +152,7 @@ async def test_refresh_removes_dropped_skill_after_index_update(tmp_path: Path) 
     config = AgentConfig(name="test", instruction="x", servers=[], skills=None)
     agent = McpAgent(config=config, context=Context())
     agent._aggregator = agg
+    _auto_approve_server(agent, "srv", home=tmp_path)
 
     await agent._refresh_skills_after_index_update("srv")
     assert {m.name for m in agent._skill_manifests if m.server_name == "srv"} == {

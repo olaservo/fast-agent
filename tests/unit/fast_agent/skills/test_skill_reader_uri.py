@@ -56,10 +56,10 @@ async def test_uri_read_dispatches_to_aggregator() -> None:
     result = await reader.execute({"path": "skill://git-workflow/SKILL.md"})
 
     assert not result.isError
-    # MCP-served content is wrapped with an untrusted-source marker per
-    # SEP §Security Implications. The body lives between the tags.
+    # MCP-served content is wrapped with a server/URI audit marker.
+    # The body lives between the tags.
     assert "# body" in result.content[0].text
-    assert "<untrusted-skill-content" in result.content[0].text
+    assert "<mcp-skill-content" in result.content[0].text
 
 
 @pytest.mark.asyncio
@@ -81,7 +81,7 @@ async def test_uri_read_allows_descendant_of_skill_root() -> None:
 
     assert not result.isError
     assert "refs" in result.content[0].text
-    assert "<untrusted-skill-content" in result.content[0].text
+    assert "<mcp-skill-content" in result.content[0].text
 
 
 @pytest.mark.asyncio
