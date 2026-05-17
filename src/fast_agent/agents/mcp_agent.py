@@ -85,6 +85,11 @@ from fast_agent.mcp.provider_management import (
     split_managed_server_names,
 )
 from fast_agent.skills import SKILLS_DEFAULT, SkillManifest
+from fast_agent.skills.consent import (
+    SkillConsentStore,
+    compute_catalog_fingerprint,
+    default_consent_path,
+)
 from fast_agent.skills.registry import SkillRegistry
 from fast_agent.tools.composite_filesystem_runtime import CompositeFilesystemRuntime
 from fast_agent.tools.elicitation import (
@@ -217,6 +222,14 @@ class McpAgent(ABC, ToolAgent):
         self._skill_discovery_lock: asyncio.Lock | None = None
         # `/skills disable <name>` results — lowercased to match SkillRegistry dedup.
         self._disabled_skill_names: set[str] = set()
+        # Per-server skill catalogs awaiting user approval (see SkillConsentStore).
+        # Manifests are held aside — NOT merged into self._skill_manifests until the
+        # user runs `/skills approve <server>`. Keyed by server name.
+        self._pending_mcp_manifests: dict[str, list[SkillManifest]] = {}
+        self._pending_mcp_archive_cache: dict[
+            str, dict[str, dict[str, bytes]]
+        ] = {}
+        self._pending_mcp_fingerprints: dict[str, str] = {}
         self._no_shell_requested = bool(context and getattr(context, "no_shell", False))
         self.set_skill_manifests(manifests)
         self.skill_registry: SkillRegistry | None = None
@@ -620,7 +633,10 @@ class McpAgent(ABC, ToolAgent):
         Merges discovered MCP manifests with any pre-existing filesystem
         manifests and updates the skill reader. On name collision, the
         filesystem manifest wins (consistent with SkillRegistry dedup).
-        Disabled per-server via MCPServerSettings.mcp_skills.
+        Per-server gates:
+          - `mcp_skills: false` — hard off; no discovery at all.
+          - Consent store / `skills_auto_approve` — soft gate; discovered
+            catalogs land in the pending set until approved.
         """
         server_names = tuple(self._aggregator.server_names or ())
         if not server_names:
@@ -652,21 +668,113 @@ class McpAgent(ABC, ToolAgent):
             )
             return
 
-        if not loaded.manifests:
-            return
+        admitted_manifests, admitted_archive_cache = self._apply_consent_gate(
+            loaded.manifests, loaded.archive_cache
+        )
+
+        # Template entries are not part of the consent surface — they're a
+        # navigational construct, not a skill body in context. Hold them
+        # unconditionally; resolution still routes through `_load_concrete_entry`
+        # which itself goes through the consent gate on next refresh.
+        self._skill_template_entries = list(loaded.template_entries)
 
         merged, warnings = merge_filesystem_and_mcp_manifests(
-            self._skill_manifests, loaded.manifests
+            self._skill_manifests, admitted_manifests
         )
         for message in warnings:
             self._record_warning(f"[dim]{message}[/dim]", surface="startup_once")
 
-        self._skill_template_entries = list(loaded.template_entries)
-
-        self.set_skill_manifests(merged, archive_cache=loaded.archive_cache)
+        self.set_skill_manifests(merged, archive_cache=admitted_archive_cache)
 
         # `resources/subscribe` is SHOULD on servers; failures are normal and silent.
         await self._subscribe_to_skill_index(server_names, enabled_servers)
+
+    def _consent_store(self) -> SkillConsentStore:
+        """Resolve the consent store for this agent's fast-agent home.
+
+        Each call returns a fresh instance backed by the same file. Cheap
+        — the file is small and the store eagerly loads on construct, so
+        we don't pay re-parsing more than once per discovery pass.
+        """
+        home_path: "Path | None" = None
+        if self._context and self._context.config:
+            home = getattr(self._context.config, "_fast_agent_home", None)
+            if home is not None:
+                home_path = Path(home).expanduser().resolve()
+        return SkillConsentStore(default_consent_path(home_path))
+
+    def _server_auto_approves_skills(self, server_name: str) -> bool:
+        """Whether `skills_auto_approve: true` is set on the server config."""
+        if not (self._context and self._context.config and self._context.config.mcp):
+            return False
+        server_settings = self._context.config.mcp.servers or {}
+        cfg = server_settings.get(server_name)
+        return bool(getattr(cfg, "skills_auto_approve", False))
+
+    def _apply_consent_gate(
+        self,
+        manifests: Sequence[SkillManifest],
+        archive_cache: dict[str, dict[str, bytes]],
+    ) -> tuple[list[SkillManifest], dict[str, dict[str, bytes]]]:
+        """Partition `manifests` into approved (returned) and pending (stashed).
+
+        Approved manifests + their archive caches are returned for the
+        caller to merge into the active skill set. Pending ones are
+        stashed on `self._pending_mcp_*` keyed by server name so they
+        can be surfaced via `/skills pending` and admitted by
+        `/skills approve <server>` without re-fetching.
+
+        Auto-approve servers (`skills_auto_approve: true`) write through
+        to the consent store on first encounter and behave as approved
+        thereafter — same persisted record shape as user approval.
+        """
+        store = self._consent_store()
+        by_server: dict[str, list[SkillManifest]] = {}
+        for manifest in manifests:
+            server = manifest.server_name or ""
+            by_server.setdefault(server, []).append(manifest)
+
+        admitted: list[SkillManifest] = []
+        admitted_cache: dict[str, dict[str, bytes]] = {}
+
+        for server, batch in by_server.items():
+            fingerprint = compute_catalog_fingerprint(server, batch)
+            server_cache = {
+                uri: files
+                for uri, files in archive_cache.items()
+                if any(m.uri and m.uri.startswith(uri) for m in batch)
+            }
+
+            if self._server_auto_approves_skills(server):
+                store.approve(server, fingerprint)
+
+            if store.is_approved(server, fingerprint):
+                admitted.extend(batch)
+                admitted_cache.update(server_cache)
+                # Clear any prior pending entry — approval supersedes it.
+                self._pending_mcp_manifests.pop(server, None)
+                self._pending_mcp_archive_cache.pop(server, None)
+                self._pending_mcp_fingerprints.pop(server, None)
+                continue
+
+            # Pending: stash for review/approval.
+            self._pending_mcp_manifests[server] = batch
+            self._pending_mcp_archive_cache[server] = server_cache
+            self._pending_mcp_fingerprints[server] = fingerprint
+            prior = store.stored_fingerprint(server)
+            reason = (
+                "catalog changed — approval re-required"
+                if prior is not None
+                else "awaiting initial approval"
+            )
+            self._record_warning(
+                f"[dim]Skills from MCP server '{server}' held pending: "
+                f"{len(batch)} skill(s), {reason}. "
+                f"Run `/skills pending` to review.[/dim]",
+                surface="startup_once",
+            )
+
+        return admitted, admitted_cache
 
     async def _subscribe_to_skill_index(
         self,
@@ -750,15 +858,22 @@ class McpAgent(ABC, ToolAgent):
             added = sorted(new_for_server - previous_for_server)
             removed = sorted(previous_for_server - new_for_server)
 
+            # Apply consent gate to the refreshed batch. If the new catalog
+            # fingerprint matches the stored consent (or auto-approve is set),
+            # the manifests are admitted and merged; otherwise this server's
+            # active skills are *withdrawn* until the user re-approves —
+            # consent must not silently survive a catalog change.
+            admitted, admitted_cache = self._apply_consent_gate(
+                loaded.manifests, loaded.archive_cache
+            )
+
             # Replace this server's manifests wholesale; keep everyone else's.
             kept = [
                 m
                 for m in self._skill_manifests
                 if m.server_name != server_name
             ]
-            merged, warnings = merge_filesystem_and_mcp_manifests(
-                kept, loaded.manifests
-            )
+            merged, warnings = merge_filesystem_and_mcp_manifests(kept, admitted)
             for message in warnings:
                 self._record_warning(
                     f"[dim]{message}[/dim]", surface="startup_once"
@@ -772,7 +887,7 @@ class McpAgent(ABC, ToolAgent):
             self._skill_template_entries = kept_templates + list(loaded.template_entries)
 
             # Archive cache is keyed by root URI; drop entries for skills this server
-            # used to publish, then overlay its new cache.
+            # used to publish, then overlay the admitted cache only.
             new_cache = dict(self._skill_archive_cache)
             previous_uris_for_server = {
                 m.uri.rstrip("/").removesuffix("/SKILL.md")
@@ -781,7 +896,7 @@ class McpAgent(ABC, ToolAgent):
             }
             for root_uri in previous_uris_for_server:
                 new_cache.pop(root_uri, None)
-            new_cache.update(loaded.archive_cache)
+            new_cache.update(admitted_cache)
 
             self.set_skill_manifests(merged, archive_cache=new_cache)
 
@@ -912,6 +1027,87 @@ class McpAgent(ABC, ToolAgent):
         self._disabled_skill_names.discard(key)
         self._rebuild_skill_reader()
         return True
+
+    def pending_skill_servers(self) -> dict[str, list[SkillManifest]]:
+        """Return a copy of the pending-catalog map, keyed by server name.
+
+        Each value is the list of manifests this server advertised that
+        haven't been approved yet. Empty dict means nothing is pending —
+        either everything's approved or no MCP server has skills.
+        """
+        return {server: list(batch) for server, batch in self._pending_mcp_manifests.items()}
+
+    def approve_skill_server(self, server_name: str) -> bool:
+        """Approve a pending server's skill catalog and merge it in.
+
+        Returns True if state changed (consent was newly written and the
+        manifests were merged), False if there's nothing pending under
+        that name. The fingerprint stored is the one computed at the
+        time the catalog was held aside — approving here means "yes,
+        the catalog you showed me in `/skills pending`."
+        """
+        pending = self._pending_mcp_manifests.get(server_name)
+        fingerprint = self._pending_mcp_fingerprints.get(server_name)
+        if not pending or not fingerprint:
+            return False
+
+        store = self._consent_store()
+        store.approve(server_name, fingerprint)
+
+        archive_cache = self._pending_mcp_archive_cache.get(server_name, {})
+
+        # Drop pending entry — the next refresh will go through the normal
+        # consent-approved path.
+        self._pending_mcp_manifests.pop(server_name, None)
+        self._pending_mcp_archive_cache.pop(server_name, None)
+        self._pending_mcp_fingerprints.pop(server_name, None)
+
+        # Merge into the active set. SkillRegistry dedup rules apply.
+        merged, warnings = merge_filesystem_and_mcp_manifests(
+            self._skill_manifests, pending
+        )
+        for message in warnings:
+            self._record_warning(f"[dim]{message}[/dim]", surface="startup_once")
+
+        new_cache = dict(self._skill_archive_cache)
+        new_cache.update(archive_cache)
+        self.set_skill_manifests(merged, archive_cache=new_cache)
+        return True
+
+    def revoke_skill_server(self, server_name: str) -> bool:
+        """Revoke a server's approval and withdraw its skills from context.
+
+        Returns True if state changed. The revoked catalog is NOT moved
+        back into the pending set — a future refresh / restart will
+        re-discover it and the gate will hold it aside again, which is
+        the same path as a brand-new server.
+        """
+        store = self._consent_store()
+        had_consent = store.revoke(server_name)
+
+        had_pending = server_name in self._pending_mcp_manifests
+        self._pending_mcp_manifests.pop(server_name, None)
+        self._pending_mcp_archive_cache.pop(server_name, None)
+        self._pending_mcp_fingerprints.pop(server_name, None)
+
+        had_active = any(m.server_name == server_name for m in self._skill_manifests)
+        if had_active:
+            filtered = [
+                m for m in self._skill_manifests if m.server_name != server_name
+            ]
+            removed_uris = {
+                m.uri.rstrip("/").removesuffix("/SKILL.md")
+                for m in self._skill_manifests
+                if m.server_name == server_name and m.uri
+            }
+            new_cache = {
+                root_uri: files
+                for root_uri, files in self._skill_archive_cache.items()
+                if root_uri not in removed_uris
+            }
+            self.set_skill_manifests(filtered, archive_cache=new_cache)
+
+        return had_consent or had_pending or had_active
 
     def _ensure_shell_runtime_for_skills(self) -> None:
         if self._no_shell_requested:
