@@ -182,6 +182,29 @@ class SkillReader:
         return best_server
 
     @staticmethod
+    def unwrap_mcp_content(text: str) -> str:
+        """Inverse of `_wrap_mcp_content`: strip the audit marker if present.
+
+        Used by user-facing surfaces (e.g. `/skills preview`) that already
+        carry their own source/URI display and don't want the wrapper as
+        visible XML noise. Unwrapped input is returned unchanged, so the
+        helper is safe to call on filesystem-skill bodies too.
+        """
+        open_prefix = "<mcp-skill-content "
+        close_tag = "</mcp-skill-content>"
+        stripped = text.rstrip("\n")
+        if not (text.startswith(open_prefix) and stripped.endswith(close_tag)):
+            return text
+        open_end = text.find(">", len(open_prefix))
+        if open_end == -1:
+            return text
+        inner = text[open_end + 1 :]
+        close_idx = inner.rfind(close_tag)
+        if close_idx == -1:
+            return text
+        return inner[:close_idx].strip("\n")
+
+    @staticmethod
     def _wrap_mcp_content(body: str, uri: str, server_name: str | None) -> str:
         """Wrap MCP-served skill content with a server/URI marker.
 
