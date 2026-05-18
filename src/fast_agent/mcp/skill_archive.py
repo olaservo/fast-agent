@@ -134,17 +134,6 @@ def _unpack_targz(blob: bytes, url: str) -> dict[str, bytes] | None:
                     },
                 )
                 return None
-            total += member.size
-            if total > MAX_ARCHIVE_UNPACKED_BYTES:
-                logger.warning(
-                    "Skill archive total uncompressed size exceeds limit",
-                    data={
-                        "url": url,
-                        "total": total,
-                        "limit": MAX_ARCHIVE_UNPACKED_BYTES,
-                    },
-                )
-                return None
             extracted = tar.extractfile(member)
             if extracted is None:
                 logger.warning(
@@ -157,6 +146,20 @@ def _unpack_targz(blob: bytes, url: str) -> dict[str, bytes] | None:
                 logger.warning(
                     "Skill archive member exceeds per-file size after read",
                     data={"url": url, "member": name, "limit": MAX_SKILL_FILE_BYTES},
+                )
+                return None
+            # Accumulate the actual decompressed length, not the header-declared
+            # size — a member declaring 1 KiB but decompressing to 1 MiB would
+            # otherwise leave `total` understated by ~1024×.
+            total += len(data)
+            if total > MAX_ARCHIVE_UNPACKED_BYTES:
+                logger.warning(
+                    "Skill archive total uncompressed size exceeds limit",
+                    data={
+                        "url": url,
+                        "total": total,
+                        "limit": MAX_ARCHIVE_UNPACKED_BYTES,
+                    },
                 )
                 return None
             files[_normalize(name)] = data
@@ -186,8 +189,9 @@ def _unpack_zip(blob: bytes, url: str) -> dict[str, bytes] | None:
                     data={"url": url, "member": name},
                 )
                 return None
-            # Declared size is checked up front (decompression-bomb defense);
-            # actual read length is verified below.
+            # Declared size is checked up front as a fast-fail; the running
+            # `total` below uses actual decompressed bytes so a member that
+            # under-declares its uncompressed size can't slip past the cap.
             if info.file_size > MAX_SKILL_FILE_BYTES:
                 logger.warning(
                     "Skill archive (zip) member declared size exceeds per-file limit",
@@ -199,23 +203,23 @@ def _unpack_zip(blob: bytes, url: str) -> dict[str, bytes] | None:
                     },
                 )
                 return None
-            total += info.file_size
-            if total > MAX_ARCHIVE_UNPACKED_BYTES:
-                logger.warning(
-                    "Skill archive (zip) declared total exceeds limit",
-                    data={
-                        "url": url,
-                        "total": total,
-                        "limit": MAX_ARCHIVE_UNPACKED_BYTES,
-                    },
-                )
-                return None
             with zf.open(info, "r") as fh:
                 data = fh.read(MAX_SKILL_FILE_BYTES + 1)
             if len(data) > MAX_SKILL_FILE_BYTES:
                 logger.warning(
                     "Skill archive (zip) member actual size exceeds limit",
                     data={"url": url, "member": name, "limit": MAX_SKILL_FILE_BYTES},
+                )
+                return None
+            total += len(data)
+            if total > MAX_ARCHIVE_UNPACKED_BYTES:
+                logger.warning(
+                    "Skill archive (zip) total uncompressed size exceeds limit",
+                    data={
+                        "url": url,
+                        "total": total,
+                        "limit": MAX_ARCHIVE_UNPACKED_BYTES,
+                    },
                 )
                 return None
             files[_normalize(name)] = data

@@ -103,21 +103,30 @@ async def test_archive_cache_read_is_wrapped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unenumerated_uri_wraps_with_unknown_server() -> None:
-    """The unenumerated `skill://` fanout path doesn't know which server
-    answered. The wrapper still fires, marking the server as `(unknown)` —
-    a strictly weaker but still-honest attribution. Critically, the
-    wrapper is *not* skipped just because we lack a name."""
+async def test_unenumerated_uri_wraps_with_responding_server() -> None:
+    """An unenumerated `skill://` URI fans out over the set of consented
+    servers (those that contributed approved manifests). When one
+    responds, the wrapper attributes the body to that server — not to
+    `(unknown)` — so the transcript records the actual source.
+    """
+    approved = SkillManifest(
+        name="git-workflow",
+        description="d",
+        body="",
+        path=None,
+        uri="skill://git-workflow/SKILL.md",
+        server_name="acme",
+    )
     agg = _fake_aggregator(
         {"skill://surprise/SKILL.md": _text_result("# body", "skill://surprise/SKILL.md")}
     )
-    reader = SkillReader([], logger=MagicMock(), aggregator=agg)
+    reader = SkillReader([approved], logger=MagicMock(), aggregator=agg)
 
     result = await reader.execute({"path": "skill://surprise/SKILL.md"})
 
     assert not result.isError
     text = result.content[0].text
-    assert 'server="(unknown)"' in text
+    assert 'server="acme"' in text
     assert "# body" in text
 
 

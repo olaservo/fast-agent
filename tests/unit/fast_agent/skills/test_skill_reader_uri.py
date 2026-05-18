@@ -278,44 +278,34 @@ async def test_file_uri_rejected_even_if_registered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orphan_skill_uri_fans_out_to_aggregator() -> None:
-    """SEP-2640 §Discovery: hosts MUST support loading a skill given only
-    its URI, even when the URI never appeared in any index. A manifest
-    that's URI-backed but has no `server_name` (or a URI handed to the
-    model that doesn't match any discovered root) reaches the aggregator
-    *without* a server_name, which fans out across connected servers.
-    First responder wins — the documented ambiguity in the SEP.
+async def test_unenumerated_skill_uri_load() -> None:
+    """SEP MUST: a `skill://` URI handed to the model loads even when no
+    manifest covers it. fast-agent narrows the fanout to consented
+    servers (those that contributed an approved manifest) so the load
+    can't reach a server whose catalog hasn't been approved.
     """
-    # Construct by bypassing __post_init__ so we can simulate the no-
-    # server_name case the SEP description matches: an unenumerated URI.
-    manifest = SkillManifest.__new__(SkillManifest)
-    object.__setattr__(manifest, "name", "orphan")
-    object.__setattr__(manifest, "description", "d")
-    object.__setattr__(manifest, "body", "")
-    object.__setattr__(manifest, "path", None)
-    object.__setattr__(manifest, "uri", "skill://orphan/SKILL.md")
-    object.__setattr__(manifest, "server_name", None)
-    object.__setattr__(manifest, "license", None)
-    object.__setattr__(manifest, "compatibility", None)
-    object.__setattr__(manifest, "metadata", None)
-    object.__setattr__(manifest, "allowed_tools", None)
-
+    # `srv` has an approved manifest (a different URI) — it's a consented
+    # source. The unenumerated URI is served by `srv` too; fanout reaches it.
+    approved = _mcp_manifest(name="git-workflow", server="srv")
     agg = _fake_aggregator(
-        {"skill://orphan/SKILL.md": _text_result("# orphan body", "skill://orphan/SKILL.md")}
+        {
+            "skill://surprise/SKILL.md": _text_result(
+                "# surprise body", "skill://surprise/SKILL.md"
+            )
+        }
     )
-    reader = SkillReader([manifest], logger=MagicMock(), aggregator=agg)
-    result = await reader.execute({"path": "skill://orphan/SKILL.md"})
+    reader = SkillReader([approved], logger=MagicMock(), aggregator=agg)
+    result = await reader.execute({"path": "skill://surprise/SKILL.md"})
 
     assert not result.isError
-    assert "orphan body" in result.content[0].text
+    assert "surprise body" in result.content[0].text
 
 
 @pytest.mark.asyncio
-async def test_unenumerated_skill_uri_load() -> None:
-    """SEP MUST: a `skill://` URI handed to the model (via server
-    instructions, user input, or another skill) loads even when no
-    manifest covers it. The aggregator fanout finds the publishing
-    server; first responder wins.
+async def test_unenumerated_skill_uri_denied_when_no_consented_servers() -> None:
+    """With zero approved manifests, an unenumerated `skill://` URI does
+    NOT fan out. This closes the consent-gate bypass: a pending server
+    must not be reachable just because the model knows a URI.
     """
     agg = _fake_aggregator(
         {
@@ -324,12 +314,11 @@ async def test_unenumerated_skill_uri_load() -> None:
             )
         }
     )
-    # No manifests at all — purely unenumerated.
     reader = SkillReader([], logger=MagicMock(), aggregator=agg)
     result = await reader.execute({"path": "skill://surprise/SKILL.md"})
 
-    assert not result.isError
-    assert "surprise body" in result.content[0].text
+    assert result.isError
+    assert "no MCP server with approved skills" in result.content[0].text
 
 
 @pytest.mark.asyncio
@@ -348,15 +337,17 @@ async def test_unenumerated_non_skill_scheme_denied() -> None:
 
 @pytest.mark.asyncio
 async def test_unenumerated_uri_with_no_responding_server() -> None:
-    """When no connected server serves the URI, return a useful error
-    instead of a stack trace from the aggregator's 'not found on any
-    server' raise."""
+    """A consented server is connected but doesn't actually serve the
+    URI. Return a useful error rather than a stack trace from the
+    aggregator's 'not found' raise.
+    """
+    approved = _mcp_manifest(name="git-workflow", server="srv")
     agg = _fake_aggregator({})  # every read raises
-    reader = SkillReader([], logger=MagicMock(), aggregator=agg)
+    reader = SkillReader([approved], logger=MagicMock(), aggregator=agg)
     result = await reader.execute({"path": "skill://missing/SKILL.md"})
 
     assert result.isError
-    assert "not served by any connected MCP server" in result.content[0].text
+    assert "not served by any MCP server with approved skills" in result.content[0].text
 
 
 @pytest.mark.asyncio
