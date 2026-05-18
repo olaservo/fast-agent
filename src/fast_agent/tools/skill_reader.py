@@ -256,20 +256,51 @@ class SkillReader:
 
         server_name = self._find_server_for_uri(uri)
         if server_name is None:
-            # Unenumerated `skill://` URI per SEP-2640 §Discovery: fan out across
-            # connected servers (first responder wins; ambiguous if multiple servers
-            # claim the same URI). `_is_uri_allowed` already restricted this path to
-            # the `skill://` scheme.
-            self._logger.debug(
-                "Reading unenumerated skill URI via aggregator fanout",
-                data={"uri": uri},
+            # Unenumerated `skill://` URI per SEP-2640 §Discovery. fast-agent
+            # narrows the fanout to servers that contributed approved
+            # manifests — the set is implicit in `_skill_manifests` because
+            # pending catalogs are held aside by the consent gate and never
+            # reach the reader. Fanning out to the aggregator's full server
+            # set would let a model that learns the URI from a side channel
+            # pull content from a server whose catalog the user hasn't
+            # approved, undoing the gate.
+            consented_servers = sorted(
+                {m.server_name for m in self._skill_manifests if m.server_name}
             )
-            try:
-                result = await self._aggregator.get_resource(uri)
-            except Exception as exc:
+            if not consented_servers:
+                return CallToolResult(
+                    isError=True,
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=(
+                                f"Resource {uri} cannot be loaded: no MCP server "
+                                "with approved skills is connected. Approve a "
+                                "catalog via `/skills approve <server>`."
+                            ),
+                        )
+                    ],
+                )
+            self._logger.debug(
+                "Reading unenumerated skill URI via consented-server fanout",
+                data={"uri": uri, "candidates": consented_servers},
+            )
+            result = None
+            last_error: Exception | None = None
+            for candidate in consented_servers:
+                try:
+                    result = await self._aggregator.get_resource(
+                        uri, server_name=candidate
+                    )
+                    server_name = candidate
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    continue
+            if result is None:
                 self._logger.error(
                     "Failed to read unenumerated MCP skill URI",
-                    data={"uri": uri, "error": str(exc)},
+                    data={"uri": uri, "error": str(last_error)},
                 )
                 return CallToolResult(
                     isError=True,
@@ -277,8 +308,8 @@ class SkillReader:
                         TextContent(
                             type="text",
                             text=(
-                                f"Resource {uri} was not served by any connected "
-                                "MCP server."
+                                f"Resource {uri} was not served by any MCP "
+                                "server with approved skills."
                             ),
                         )
                     ],
@@ -333,8 +364,6 @@ class SkillReader:
             "Read MCP skill resource",
             data={"uri": uri, "chars": sum(len(p) for p in text_parts)},
         )
-        # `server_name` may be None on the unenumerated-URI fanout path; the wrapper
-        # still fires with server="(unknown)" so the URI is at least attributable.
         wrapped = self._wrap_mcp_content("\n".join(text_parts), uri, server_name)
         return CallToolResult(
             isError=False,
