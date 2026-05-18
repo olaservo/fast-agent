@@ -99,6 +99,45 @@ async def test_preview_mcp_skill_uses_uri_and_shows_server() -> None:
 
 
 @pytest.mark.asyncio
+async def test_preview_strips_mcp_wrapper_from_body() -> None:
+    """The live SkillReader wraps MCP-served bodies in
+    `<mcp-skill-content server=...>` for transcript attribution. The
+    preview header already prints the source and URI, so the wrapper
+    is redundant noise here. Verify it's stripped before the body is
+    rendered to the user.
+    """
+    manifest = SkillManifest(
+        name="pdf-processing",
+        description="x",
+        body="",
+        path=None,
+        uri="skill://pdf-processing/SKILL.md",
+        server_name="acme",
+    )
+    wrapped = (
+        '<mcp-skill-content server="acme" uri="skill://pdf-processing/SKILL.md">\n'
+        "# PDF Processing\n\nBody text.\n"
+        "</mcp-skill-content>"
+    )
+    read_result = CallToolResult(
+        content=[TextContent(type="text", text=wrapped)],
+        isError=False,
+    )
+    agent = _make_agent([manifest], read_result)
+
+    outcome = await handle_skills_command(
+        _ctx(agent), agent_name="default", action="preview", argument="pdf-processing"
+    )
+    text = _outcome_text(outcome)
+    # The body content survives.
+    assert "# PDF Processing" in text
+    assert "Body text." in text
+    # The wrapper tags are gone.
+    assert "<mcp-skill-content" not in text
+    assert "</mcp-skill-content>" not in text
+
+
+@pytest.mark.asyncio
 async def test_preview_case_insensitive_name_match() -> None:
     manifest = SkillManifest(
         name="Refunds",  # capitalized in frontmatter

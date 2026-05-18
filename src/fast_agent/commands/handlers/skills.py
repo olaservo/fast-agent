@@ -1112,6 +1112,14 @@ async def handle_preview_skill(
         )
         return outcome
 
+    # The reader wraps MCP-served bodies in `<mcp-skill-content ...>` so the
+    # model's transcript records the server and URI. The preview header below
+    # already prints both, so the wrapper would be redundant XML noise in the
+    # user's view. Strip it; the unwrap helper is a no-op on filesystem reads.
+    from fast_agent.tools.skill_reader import SkillReader as _SkillReader
+
+    body = _SkillReader.unwrap_mcp_content(body)
+
     header = Text()
     append_heading(header, f"Skill preview: {match.name}")
     source = (
