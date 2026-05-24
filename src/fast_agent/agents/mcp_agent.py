@@ -79,6 +79,8 @@ from fast_agent.mcp.mcp_skills_loader import (
     merge_filesystem_and_mcp_manifests,
 )
 from fast_agent.mcp.prompt_metadata import prompt_display_name
+from fast_agent.mcp.skill_uri import strip_skill_md
+from rich.markup import escape as _rich_escape
 from fast_agent.mcp.provider_management import (
     ProviderManagedMCPState,
     build_provider_managed_mcp_state,
@@ -230,6 +232,10 @@ class McpAgent(ABC, ToolAgent):
             str, dict[str, dict[str, bytes]]
         ] = {}
         self._pending_mcp_fingerprints: dict[str, str] = {}
+        # Templates from servers whose catalog is still pending. Surfaced
+        # nowhere until the catalog is approved — otherwise the user could
+        # `/skills resolve` an entry and merge an unconsented manifest.
+        self._pending_mcp_template_entries: dict[str, list[SkillTemplateEntry]] = {}
         self._no_shell_requested = bool(context and getattr(context, "no_shell", False))
         self.set_skill_manifests(manifests)
         self.skill_registry: SkillRegistry | None = None
@@ -642,6 +648,12 @@ class McpAgent(ABC, ToolAgent):
         if not server_names:
             return
 
+        # Drop subscription tracking for servers no longer attached so a
+        # detach + re-attach cycle re-subscribes on the new connection.
+        # Without this the set would still claim membership for a name
+        # whose underlying session has been replaced.
+        self._skill_subscribed_servers.intersection_update(server_names)
+
         enabled_servers: set[str] | None = None
         if self._context and self._context.config and self._context.config.mcp:
             server_settings = self._context.config.mcp.servers or {}
@@ -672,11 +684,16 @@ class McpAgent(ABC, ToolAgent):
             loaded.manifests, loaded.archive_cache
         )
 
-        # Template entries are not part of the consent surface — they're a
-        # navigational construct, not a skill body in context. Hold them
-        # unconditionally; resolution still routes through `_load_concrete_entry`
-        # which itself goes through the consent gate on next refresh.
-        self._skill_template_entries = list(loaded.template_entries)
+        # Templates belong to the consent surface: a malicious server that
+        # only publishes templates could otherwise list itself in
+        # `/skills templates` and the user could `/skills resolve` an entry,
+        # registering a skill that never went through `_apply_consent_gate`.
+        # Partition templates by their publishing server's approval state.
+        active_templates, pending_templates = self._partition_template_entries(
+            loaded.template_entries
+        )
+        self._skill_template_entries = active_templates
+        self._pending_mcp_template_entries = pending_templates
 
         merged, warnings = merge_filesystem_and_mcp_manifests(
             self._skill_manifests, admitted_manifests
@@ -739,10 +756,18 @@ class McpAgent(ABC, ToolAgent):
 
         for server, batch in by_server.items():
             fingerprint = compute_catalog_fingerprint(server, batch)
+            # Cache key is a skill root URI; manifest.uri ends with /SKILL.md
+            # or descends from the root. Bare `startswith(uri)` collides on
+            # neighboring roots like `skill://foo` vs `skill://foobar` — use
+            # the explicit `==` or `f"{uri}/"` boundary to match the
+            # admission and revoke paths.
             server_cache = {
                 uri: files
                 for uri, files in archive_cache.items()
-                if any(m.uri and m.uri.startswith(uri) for m in batch)
+                if any(
+                    m.uri and (m.uri == uri or m.uri.startswith(f"{uri}/"))
+                    for m in batch
+                )
             }
 
             if self._server_auto_approves_skills(server):
@@ -768,13 +793,42 @@ class McpAgent(ABC, ToolAgent):
                 else "awaiting initial approval"
             )
             self._record_warning(
-                f"[dim]Skills from MCP server '{server}' held pending: "
+                f"[dim]Skills from MCP server '{_rich_escape(server)}' held pending: "
                 f"{len(batch)} skill(s), {reason}. "
                 f"Run `/skills pending` to review.[/dim]",
                 surface="startup_once",
             )
 
         return admitted, admitted_cache
+
+    def _partition_template_entries(
+        self, entries: Sequence[SkillTemplateEntry]
+    ) -> tuple[list[SkillTemplateEntry], dict[str, list[SkillTemplateEntry]]]:
+        """Sort templates into active (approved server) vs pending (unapproved).
+
+        Returns `(active, pending_by_server)`. Active templates are exposed
+        via `/skills templates` and admissible to `/skills resolve`.
+        Pending templates are held until the publishing server's catalog
+        is approved, at which point `approve_skill_server` lifts them
+        across. A server is "approved" if it has no pending fingerprint
+        (its catalog was admitted) or its current pending fingerprint
+        matches the stored consent record.
+        """
+        store = self._consent_store()
+        active: list[SkillTemplateEntry] = []
+        pending: dict[str, list[SkillTemplateEntry]] = {}
+        for entry in entries:
+            server = entry.server_name
+            fingerprint = self._pending_mcp_fingerprints.get(server)
+            server_approved = (
+                fingerprint is None
+                or store.is_approved(server, fingerprint)
+            )
+            if server_approved:
+                active.append(entry)
+            else:
+                pending.setdefault(server, []).append(entry)
+        return active, pending
 
     async def _subscribe_to_skill_index(
         self,
@@ -789,6 +843,11 @@ class McpAgent(ABC, ToolAgent):
         we don't override (live skill updates won't fire for us, but the
         already-installed callback continues to do its job).
         """
+        # Create the discovery lock here (inside an async function, where an
+        # event loop is guaranteed to exist) so concurrent notifications
+        # don't each construct a fresh Lock and lose serialization.
+        if self._skill_discovery_lock is None:
+            self._skill_discovery_lock = asyncio.Lock()
         # Don't clobber an existing notification handler if one is already wired.
         agg = self._aggregator
         if getattr(agg, "server_notification_callback", None) is None:
@@ -854,9 +913,6 @@ class McpAgent(ABC, ToolAgent):
                 for m in self._skill_manifests
                 if m.server_name == server_name
             }
-            new_for_server = {m.name for m in loaded.manifests}
-            added = sorted(new_for_server - previous_for_server)
-            removed = sorted(previous_for_server - new_for_server)
 
             # Apply consent gate to the refreshed batch. If the new catalog
             # fingerprint matches the stored consent (or auto-approve is set),
@@ -866,6 +922,13 @@ class McpAgent(ABC, ToolAgent):
             admitted, admitted_cache = self._apply_consent_gate(
                 loaded.manifests, loaded.archive_cache
             )
+
+            # Diff against `admitted` (what actually became active) not
+            # `loaded.manifests` (the pre-gate set). Otherwise the toolbar
+            # would advertise "+skill-X" for skills the gate held pending.
+            new_for_server = {m.name for m in admitted}
+            added = sorted(new_for_server - previous_for_server)
+            removed = sorted(previous_for_server - new_for_server)
 
             # Replace this server's manifests wholesale; keep everyone else's.
             kept = [
@@ -879,18 +942,33 @@ class McpAgent(ABC, ToolAgent):
                     f"[dim]{message}[/dim]", surface="startup_once"
                 )
 
-            kept_templates = [
+            # Refresh templates for this server only: drop the prior set (active
+            # and pending) and re-partition the loaded entries against the now-
+            # updated consent state.
+            kept_active = [
                 t
                 for t in self._skill_template_entries
                 if getattr(t, "server_name", None) != server_name
             ]
-            self._skill_template_entries = kept_templates + list(loaded.template_entries)
+            kept_pending = {
+                srv: entries
+                for srv, entries in self._pending_mcp_template_entries.items()
+                if srv != server_name
+            }
+            new_active, new_pending = self._partition_template_entries(
+                list(loaded.template_entries)
+            )
+            self._skill_template_entries = kept_active + new_active
+            merged_pending = dict(kept_pending)
+            for srv, entries in new_pending.items():
+                merged_pending.setdefault(srv, []).extend(entries)
+            self._pending_mcp_template_entries = merged_pending
 
             # Archive cache is keyed by root URI; drop entries for skills this server
             # used to publish, then overlay the admitted cache only.
             new_cache = dict(self._skill_archive_cache)
             previous_uris_for_server = {
-                m.uri.rstrip("/").removesuffix("/SKILL.md")
+                strip_skill_md(m.uri)
                 for m in self._skill_manifests
                 if m.server_name == server_name and m.uri
             }
@@ -909,8 +987,8 @@ class McpAgent(ABC, ToolAgent):
             )
             self._record_warning(
                 (
-                    f"[dim]Skills updated from server '{server_name}': "
-                    f"{change_summary}[/dim]"
+                    f"[dim]Skills updated from server '{_rich_escape(server_name)}': "
+                    f"{_rich_escape(change_summary)}[/dim]"
                 ),
                 surface="runtime_toolbar",
             )
@@ -954,8 +1032,27 @@ class McpAgent(ABC, ToolAgent):
         Returns the new manifest on success, or None if expansion or
         fetch failed (the reason is already logged by the loader). The
         host emits its own user-facing notice from the caller.
+
+        Trust-boundary: refuses to register a manifest whose publishing
+        server is currently pending. `_partition_template_entries` already
+        suppresses pending-server templates from `/skills templates`, but
+        this is a defense-in-depth gate against any call path that hands
+        in a template directly.
         """
         from fast_agent.mcp.mcp_skills_loader import resolve_skill_template
+
+        # Defense in depth: pending-server templates should never reach
+        # `/skills templates`, but if a caller bypasses that surface we
+        # still refuse to merge a manifest from an unapproved server.
+        if template.server_name in self._pending_mcp_manifests:
+            self.logger.warning(
+                "Refusing to register resolved template from pending server",
+                data={
+                    "server": template.server_name,
+                    "template": template.url_template,
+                },
+            )
+            return None
 
         manifest = await resolve_skill_template(self._aggregator, template, variables)
         if manifest is None:
@@ -993,11 +1090,21 @@ class McpAgent(ABC, ToolAgent):
                 for m in self._skill_manifests
                 if m.name.lower() not in self._disabled_skill_names
             ]
+            # Disabled URI roots are blocked at read time, not just hidden
+            # from the listing — otherwise the model could still call
+            # read_skill on a disabled skill's URI via the unenumerated
+            # `skill://` fallback path in SkillReader._is_uri_allowed.
+            disabled_uri_roots: set[str] = {
+                strip_skill_md(m.uri)
+                for m in self._skill_manifests
+                if m.uri and m.name.lower() in self._disabled_skill_names
+            }
             self._skill_reader = SkillReader(
                 visible,
                 self.logger,
                 aggregator=self._aggregator,
                 archive_cache=self._skill_archive_cache or None,
+                disabled_uri_roots=disabled_uri_roots,
             )
             self._ensure_shell_runtime_for_skills()
         else:
@@ -1055,12 +1162,14 @@ class McpAgent(ABC, ToolAgent):
         store.approve(server_name, fingerprint)
 
         archive_cache = self._pending_mcp_archive_cache.get(server_name, {})
+        pending_templates = self._pending_mcp_template_entries.get(server_name, [])
 
         # Drop pending entry — the next refresh will go through the normal
         # consent-approved path.
         self._pending_mcp_manifests.pop(server_name, None)
         self._pending_mcp_archive_cache.pop(server_name, None)
         self._pending_mcp_fingerprints.pop(server_name, None)
+        self._pending_mcp_template_entries.pop(server_name, None)
 
         # Merge into the active set. SkillRegistry dedup rules apply.
         merged, warnings = merge_filesystem_and_mcp_manifests(
@@ -1071,6 +1180,12 @@ class McpAgent(ABC, ToolAgent):
 
         new_cache = dict(self._skill_archive_cache)
         new_cache.update(archive_cache)
+        # Lift the server's templates into the active set now that the
+        # catalog is approved — they were withheld alongside the manifests.
+        if pending_templates:
+            self._skill_template_entries = (
+                list(self._skill_template_entries) + list(pending_templates)
+            )
         self.set_skill_manifests(merged, archive_cache=new_cache)
         return True
 
@@ -1089,6 +1204,19 @@ class McpAgent(ABC, ToolAgent):
         self._pending_mcp_manifests.pop(server_name, None)
         self._pending_mcp_archive_cache.pop(server_name, None)
         self._pending_mcp_fingerprints.pop(server_name, None)
+        self._pending_mcp_template_entries.pop(server_name, None)
+
+        # Withdraw any active templates from this server too — symmetric with
+        # withdrawing the manifests below.
+        had_active_templates = any(
+            t.server_name == server_name for t in self._skill_template_entries
+        )
+        if had_active_templates:
+            self._skill_template_entries = [
+                t
+                for t in self._skill_template_entries
+                if t.server_name != server_name
+            ]
 
         had_active = any(m.server_name == server_name for m in self._skill_manifests)
         if had_active:
@@ -1096,7 +1224,7 @@ class McpAgent(ABC, ToolAgent):
                 m for m in self._skill_manifests if m.server_name != server_name
             ]
             removed_uris = {
-                m.uri.rstrip("/").removesuffix("/SKILL.md")
+                strip_skill_md(m.uri)
                 for m in self._skill_manifests
                 if m.server_name == server_name and m.uri
             }
@@ -1107,7 +1235,7 @@ class McpAgent(ABC, ToolAgent):
             }
             self.set_skill_manifests(filtered, archive_cache=new_cache)
 
-        return had_consent or had_pending or had_active
+        return had_consent or had_pending or had_active or had_active_templates
 
     def _ensure_shell_runtime_for_skills(self) -> None:
         if self._no_shell_requested:

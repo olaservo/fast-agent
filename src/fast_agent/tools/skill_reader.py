@@ -13,12 +13,19 @@ and MCP-backed skills share one tool.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import quoteattr as _xml_quoteattr
 
 from mcp.types import BlobResourceContents, CallToolResult, TextContent, TextResourceContents, Tool
 
 from fast_agent.mcp.skill_uri import strip_skill_md
+
+# Matches any case-insensitive occurrence of `</mcp-skill-content` (optionally
+# followed by content up to `>`). Body matches are neutered before wrapping so
+# server-supplied text cannot forge an early close to the audit marker.
+_CLOSE_TAG_PATTERN = re.compile(r"</mcp-skill-content", re.IGNORECASE)
 
 if TYPE_CHECKING:
     from fast_agent.mcp.mcp_aggregator import MCPAggregator
@@ -35,6 +42,7 @@ class SkillReader:
         *,
         aggregator: "MCPAggregator | None" = None,
         archive_cache: dict[str, dict[str, bytes]] | None = None,
+        disabled_uri_roots: set[str] | None = None,
     ) -> None:
         """
         Initialize the skill reader.
@@ -51,6 +59,10 @@ class SkillReader:
                 served locally instead of round-tripping through the
                 server. Trust-boundary enforcement is unchanged: archive
                 roots seed `_allowed_uri_roots` like any other URI root.
+            disabled_uri_roots: Root URIs of skills the user has toggled
+                off. Reads matching these roots are rejected even on the
+                unenumerated `skill://` admission path — without this the
+                disable would only hide the listing, not block reads.
         """
         self._skill_manifests = skill_manifests
         self._logger = logger
@@ -66,6 +78,7 @@ class SkillReader:
                 self._allowed_directories.add(manifest.path.parent.resolve())
             if manifest.uri:
                 self._allowed_uri_roots.add(strip_skill_md(manifest.uri))
+        self._disabled_uri_roots: set[str] = set(disabled_uri_roots or ())
 
         self._tool = Tool(
             name="read_skill",
@@ -161,6 +174,13 @@ class SkillReader:
             decoded = segment.replace("%2e", ".")
             if decoded in ("..", "."):
                 return False
+        # Disabled-skill blocklist takes precedence over the admission paths
+        # below. Without this, `/skills disable` would only hide the listing —
+        # the model could still read the skill body by URI on the unenumerated
+        # `skill://` fallback path.
+        for blocked in self._disabled_uri_roots:
+            if uri == blocked or uri.startswith(f"{blocked}/"):
+                return False
         for root in self._allowed_uri_roots:
             if uri == root or uri.startswith(f"{root}/"):
                 return True
@@ -228,11 +248,21 @@ class SkillReader:
         Filesystem skills are NOT wrapped — they have no server to
         attribute and no URI to record. The wrapper is purely the
         marker for "this content came from a connected MCP server."
+
+        The wrapper must not be forgeable by the very content it wraps:
+        - Attributes are XML-quoted so a `"` in `uri` (or unusual chars
+          in `server_name`) can't inject sibling attributes.
+        - Any `</mcp-skill-content` substring in `body` is neutralized to
+          `< /mcp-skill-content` — visually preserved, but no longer a
+          tag-close match. Without this, server content could close the
+          marker early and have subsequent text appear outside it.
         """
         server = server_name if server_name else "(unknown)"
+        sanitized_body = _CLOSE_TAG_PATTERN.sub("< /mcp-skill-content", body)
         return (
-            f'<mcp-skill-content server="{server}" uri="{uri}">\n'
-            f"{body}\n"
+            f"<mcp-skill-content server={_xml_quoteattr(server)} "
+            f"uri={_xml_quoteattr(uri)}>\n"
+            f"{sanitized_body}\n"
             f"</mcp-skill-content>"
         )
 

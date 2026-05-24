@@ -19,7 +19,7 @@ from mcp.types import BlobResourceContents, TextResourceContents
 
 from fast_agent.core.logging.logger import get_logger
 from fast_agent.mcp.skill_archive import unpack_skill_archive
-from fast_agent.mcp.skill_uri import skill_name_from_uri
+from fast_agent.mcp.skill_uri import skill_name_from_uri, strip_skill_md
 from fast_agent.skills.registry import SkillManifest, SkillRegistry
 
 if TYPE_CHECKING:
@@ -220,7 +220,7 @@ async def load_mcp_skill_manifests(
                 if pair is not None:
                     manifest, files = pair
                     result.manifests.append(manifest)
-                    root_uri = manifest.uri.removesuffix("/SKILL.md")
+                    root_uri = strip_skill_md(manifest.uri)
                     result.archive_cache[root_uri] = files
                 continue
             logger.debug(
