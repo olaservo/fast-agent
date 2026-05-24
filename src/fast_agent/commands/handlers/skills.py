@@ -1432,13 +1432,19 @@ async def handle_skills_command(
 ) -> CommandOutcome:
     normalized = str(action or "list").lower()
 
+    # `normalized` defaults to "list" so the bare `""` branch below is
+    # unreachable; route the help flag on either token (action or argument)
+    # so `/skills --help` and `/skills <action> --help` both reach global
+    # help. Per-action help would be nicer if any action grew enough surface
+    # to warrant it, but today every action is small enough that the global
+    # listing is the right answer.
     if _is_help_flag(action) or _is_help_flag(argument):
         return handle_skills_help(agent_name=agent_name)
 
-    if normalized in {"help"}:
+    if normalized == "help":
         return handle_skills_help(agent_name=agent_name)
 
-    if normalized in {"list", ""}:
+    if normalized == "list":
         return await handle_list_skills(ctx, agent_name=agent_name)
     if normalized in {"available", "marketplace", "browse"}:
         return await handle_list_marketplace_skills(ctx, agent_name=agent_name, query=None)

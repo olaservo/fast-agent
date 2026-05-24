@@ -136,6 +136,48 @@ async def test_disable_then_enable_round_trip(tmp_path: Path) -> None:
     assert not result.isError
 
 
+@pytest.mark.asyncio
+async def test_disabled_mcp_skill_uri_is_unreadable(tmp_path: Path) -> None:
+    """`/skills disable` must block reads via the unenumerated `skill://`
+    fallback path, not just hide the listing.
+
+    SEP-2640 requires hosts to admit `skill://` URIs even when they
+    aren't in any index (so the model can act on URIs mentioned in
+    server instructions, links from other skills, etc.). Without a
+    disable-blocklist that path lets the model still read the body of
+    a skill the user explicitly turned off.
+    """
+    fs = _fs_manifest(tmp_path, "alpha")  # at least one path-backed skill so reader exists
+    mcp = _mcp_manifest("beta", server="github")
+    config = AgentConfig(
+        name="test", instruction="x", servers=[], skills=tmp_path
+    )
+    config.skill_manifests = [fs, mcp]
+    agent = McpAgent(config=config, context=Context())
+
+    target_uri = "skill://beta/SKILL.md"
+
+    # Pre-disable: the URI is admitted (it matches the manifest root).
+    assert agent._skill_reader._is_uri_allowed(target_uri) is True
+    # Even before being added to the index it would be admitted by the
+    # unenumerated-skill:// rule — that's the path we're guarding.
+    assert agent._skill_reader._is_uri_allowed("skill://other/SKILL.md") is True
+
+    assert agent.disable_skill("beta") is True
+
+    # Disabled: both the exact URI and a child under the same root reject.
+    assert agent._skill_reader._is_uri_allowed(target_uri) is False
+    assert (
+        agent._skill_reader._is_uri_allowed("skill://beta/scripts/run.py") is False
+    )
+    # Unrelated unenumerated URIs are still admissible.
+    assert agent._skill_reader._is_uri_allowed("skill://other/SKILL.md") is True
+
+    # Re-enable restores access.
+    assert agent.enable_skill("beta") is True
+    assert agent._skill_reader._is_uri_allowed(target_uri) is True
+
+
 def test_disable_unknown_returns_false(tmp_path: Path) -> None:
     """Trying to disable a skill the agent doesn't have must not silently
     add the name to the set — otherwise an enable would do nothing and

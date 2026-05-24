@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+from xml.sax.saxutils import escape as _xml_escape
 
 import frontmatter
 
@@ -321,11 +322,15 @@ def format_skills_for_prompt(
         if manifest.name.lower() in disabled:
             continue
         lines: list[str] = ["<skill>"]
-        lines.append(f"  <name>{manifest.name}</name>")
+        # MCP-served name/description/uri are server-controlled; raw
+        # interpolation would let a malicious frontmatter inject sibling
+        # <skill> tags into the model's authoritative listing. Escape every
+        # field — filesystem fields too, for consistency.
+        lines.append(f"  <name>{_xml_escape(manifest.name)}</name>")
 
         description = (manifest.description or "").strip()
         if description:
-            lines.append(f"  <description>{description}</description>")
+            lines.append(f"  <description>{_xml_escape(description)}</description>")
 
         if manifest.uri:
             # Skills-over-MCP SEP: location is the resource URI (any scheme),
@@ -333,22 +338,24 @@ def format_skills_for_prompt(
             # skill root).
             has_mcp_skill = True
             skill_root = strip_skill_md(manifest.uri)
-            lines.append(f"  <location>{manifest.uri}</location>")
-            lines.append(f"  <directory>{skill_root}</directory>")
+            lines.append(f"  <location>{_xml_escape(manifest.uri)}</location>")
+            lines.append(f"  <directory>{_xml_escape(skill_root)}</directory>")
             server = manifest.server_name or "unknown"
-            lines.append(f"  <source>{server}</source>")
+            lines.append(f"  <source>{_xml_escape(server)}</source>")
         elif manifest.path is not None:
             # Filesystem skill: location is the absolute SKILL.md path.
             # No <source> element — its absence signals user-installed
             # provenance, symmetric with the unwrapped read-time content.
             skill_dir = manifest.path.parent
-            lines.append(f"  <location>{manifest.path}</location>")
-            lines.append(f"  <directory>{skill_dir}</directory>")
+            lines.append(f"  <location>{_xml_escape(str(manifest.path))}</location>")
+            lines.append(f"  <directory>{_xml_escape(str(skill_dir))}</directory>")
 
             for tag_name in ("scripts", "references", "assets"):
                 subdir = skill_dir / tag_name
                 if subdir.is_dir():
-                    lines.append(f"  <{tag_name}>{subdir}</{tag_name}>")
+                    lines.append(
+                        f"  <{tag_name}>{_xml_escape(str(subdir))}</{tag_name}>"
+                    )
 
         lines.append("</skill>")
         formatted_parts.append("\n".join(lines))

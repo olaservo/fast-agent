@@ -242,3 +242,122 @@ def test_filesystem_skills_unaffected_by_gate(tmp_path: Path) -> None:
     agent._apply_consent_gate([_mcp_manifest("mcp-skill")])
     assert "fs-skill" in {m.name for m in agent._skill_manifests}
     assert "github" in agent.pending_skill_servers()
+
+
+# --- template entries are part of the consent surface --------------------
+
+
+def test_templates_from_pending_server_held_aside(tmp_path: Path) -> None:
+    """A server publishing only `mcp-resource-template` entries can otherwise
+    smuggle a manifest in via `/skills resolve` without ever being approved.
+    Templates from pending servers must be partitioned to a held-aside set."""
+    from fast_agent.mcp.mcp_skills_loader import SkillTemplateEntry
+
+    agent = _agent_with_home(tmp_path)
+    manifests = [_mcp_manifest("alpha")]
+    template = SkillTemplateEntry(
+        server_name="github",
+        url_template="skill://docs/{product}/SKILL.md",
+        description="docs",
+    )
+    agent._apply_consent_gate(manifests)
+    active, pending = agent._partition_template_entries([template])
+
+    assert active == []
+    assert pending == {"github": [template]}
+
+
+def test_templates_from_approved_server_are_active(tmp_path: Path) -> None:
+    from fast_agent.mcp.mcp_skills_loader import SkillTemplateEntry
+
+    consent_path = default_consent_path(tmp_path)
+    manifests = [_mcp_manifest("alpha")]
+    SkillConsentStore(consent_path).approve(
+        "github", compute_catalog_fingerprint("github", manifests)
+    )
+
+    agent = _agent_with_home(tmp_path)
+    agent._apply_consent_gate(manifests)
+    template = SkillTemplateEntry(
+        server_name="github",
+        url_template="skill://docs/{product}/SKILL.md",
+        description="docs",
+    )
+    active, pending = agent._partition_template_entries([template])
+
+    assert active == [template]
+    assert pending == {}
+
+
+@pytest.mark.asyncio
+async def test_register_resolved_template_rejects_pending_server(tmp_path: Path) -> None:
+    """Defense-in-depth: even if a caller hands `register_resolved_skill_template`
+    a template whose server is pending, the merge is refused. Without this,
+    a non-UI code path could bypass `_partition_template_entries`."""
+    from fast_agent.mcp.mcp_skills_loader import SkillTemplateEntry
+
+    agent = _agent_with_home(tmp_path)
+    # Put the server into the pending set without approval.
+    agent._apply_consent_gate([_mcp_manifest("alpha")])
+    assert "github" in agent.pending_skill_servers()
+
+    template = SkillTemplateEntry(
+        server_name="github",
+        url_template="skill://docs/{product}/SKILL.md",
+        description="docs",
+    )
+
+    manifest = await agent.register_resolved_skill_template(
+        template, {"product": "anvil"}
+    )
+
+    assert manifest is None
+    # Active manifests unchanged — pending server stays pending.
+    assert not any(
+        m.server_name == "github" for m in agent._skill_manifests
+    )
+
+
+def test_approve_lifts_pending_templates(tmp_path: Path) -> None:
+    from fast_agent.mcp.mcp_skills_loader import SkillTemplateEntry
+
+    agent = _agent_with_home(tmp_path)
+    agent._apply_consent_gate([_mcp_manifest("alpha")])
+    template = SkillTemplateEntry(
+        server_name="github",
+        url_template="skill://docs/{product}/SKILL.md",
+        description="docs",
+    )
+    active, pending = agent._partition_template_entries([template])
+    agent._skill_template_entries = active
+    agent._pending_mcp_template_entries = pending
+    assert agent._skill_template_entries == []
+    assert agent._pending_mcp_template_entries == {"github": [template]}
+
+    assert agent.approve_skill_server("github") is True
+    # After approval, the template is active and the pending set is empty.
+    assert template in agent._skill_template_entries
+    assert agent._pending_mcp_template_entries == {}
+
+
+def test_revoke_drops_active_templates(tmp_path: Path) -> None:
+    from fast_agent.mcp.mcp_skills_loader import SkillTemplateEntry
+
+    consent_path = default_consent_path(tmp_path)
+    manifests = [_mcp_manifest("alpha")]
+    SkillConsentStore(consent_path).approve(
+        "github", compute_catalog_fingerprint("github", manifests)
+    )
+    agent = _agent_with_home(tmp_path)
+    agent._apply_consent_gate(manifests)
+    template = SkillTemplateEntry(
+        server_name="github",
+        url_template="skill://docs/{product}/SKILL.md",
+        description="docs",
+    )
+    active, _ = agent._partition_template_entries([template])
+    agent._skill_template_entries = active
+    assert template in agent._skill_template_entries
+
+    assert agent.revoke_skill_server("github") is True
+    assert template not in agent._skill_template_entries
