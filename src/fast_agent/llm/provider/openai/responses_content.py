@@ -614,6 +614,16 @@ class ResponsesContentMixin:
     ) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
         for item in contents:
+            # Skip text-only resources: their `.text` is already concatenated
+            # into the `function_call_output.output` text by the caller, so
+            # re-attaching them as `input_file` with the raw URI is either
+            # redundant or actively breaks — non-fetchable schemes like
+            # `repo://` or `skill://` trigger OpenAI Responses API
+            # 400 'Failed to download file' (param=url).
+            if is_resource_content(item):
+                resource = getattr(item, "resource", None)
+                if resource is not None and getattr(resource, "text", None) is not None:
+                    continue
             if is_image_content(item) or is_resource_content(item) or is_resource_link(item):
                 input_part = self._content_to_input_part(item)
                 if input_part:
