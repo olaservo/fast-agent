@@ -2919,6 +2919,16 @@ class MCPAggregator(ContextDependent):
                 f"Server '{server_name}' does not support resource subscriptions"
             )
 
+        # Subscriptions only deliver `resources/updated` over a persistent connection. In
+        # non-persistent mode `_execute_on_server` tears the connection down right after the
+        # subscribe call, so no notifications can ever arrive — warn rather than silently no-op.
+        if not self.connection_persistence:
+            logger.warning(
+                f"Subscribing to '{resource_uri}' on server '{server_name}' has no effect "
+                "without persistent connections (connection_persistence=False); "
+                "no resource update notifications will be delivered."
+            )
+
         try:
             uri = AnyUrl(resource_uri)
         except Exception as e:
