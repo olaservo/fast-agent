@@ -29,7 +29,8 @@ def _make_agent(
     assert isinstance(agent, AgentProtocol)
     agent.list_resources = AsyncMock(return_value=resources or {})
     agent.get_subscriptions = MagicMock(return_value=subscriptions or {})
-    agent.subscribe_resource = AsyncMock()
+    # Default: subscription delivers updates (persistent connection).
+    agent.subscribe_resource = AsyncMock(return_value=True)
     agent.unsubscribe_resource = AsyncMock()
     return agent
 
@@ -67,6 +68,21 @@ async def test_subscribe_infers_single_server() -> None:
 
     agent.subscribe_resource.assert_awaited_once_with("file:///a.txt", namespace="demo")
     assert "Subscribed to" in _texts(outcome)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_without_persistence_warns_user() -> None:
+    agent = _make_agent(resources={"demo": ["file:///a.txt"]})
+    agent.subscribe_resource = AsyncMock(return_value=False)
+    ctx = _make_context(agent)
+
+    outcome = await handle_resources_command(
+        ctx, agent_name="demo-agent", action="subscribe", argument="file:///a.txt"
+    )
+
+    text = _texts(outcome)
+    assert "Subscribed to" in text
+    assert "persistent connections" in text
 
 
 @pytest.mark.asyncio

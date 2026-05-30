@@ -374,7 +374,7 @@ class AgentApp:
         resource_uri: str,
         server_name: str,
         agent_name: str | None = None,
-    ) -> None:
+    ) -> bool:
         """
         Subscribe to change notifications for a resource (MCP `resources/subscribe`).
 
@@ -382,9 +382,13 @@ class AgentApp:
             resource_uri: URI of the resource to subscribe to
             server_name: Name of the MCP server that owns the resource
             agent_name: Name of the agent to use
+
+        Returns:
+            True if the subscription can receive update notifications; False in non-persistent
+            mode, where the request is sent but no `resources/updated` will be delivered.
         """
         await self._refresh_if_needed()
-        await self._agent(agent_name).subscribe_resource(
+        return await self._agent(agent_name).subscribe_resource(
             resource_uri=resource_uri, namespace=server_name
         )
 

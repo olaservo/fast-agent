@@ -356,7 +356,7 @@ class AgentProtocol(LlmAgentProtocol, Protocol):
 
     async def subscribe_resource(
         self, resource_uri: str, namespace: str | None = None
-    ) -> None: ...
+    ) -> bool: ...
 
     async def unsubscribe_resource(
         self, resource_uri: str, namespace: str | None = None

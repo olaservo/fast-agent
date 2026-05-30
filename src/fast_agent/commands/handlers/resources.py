@@ -204,9 +204,10 @@ async def _handle_subscribe(
                 agent_name,
             )
 
+    delivers_updates = True
     try:
         if subscribe:
-            await agent.subscribe_resource(resource_uri, namespace=server_name)
+            delivers_updates = await agent.subscribe_resource(resource_uri, namespace=server_name)
         else:
             await agent.unsubscribe_resource(resource_uri, namespace=server_name)
     except ValueError as exc:
@@ -219,4 +220,11 @@ async def _handle_subscribe(
         right_info=_RESOURCES_RIGHT_INFO,
         agent_name=agent_name,
     )
+    if subscribe and not delivers_updates:
+        _warn(
+            outcome,
+            "Note: this server is connected without persistent connections, so resource "
+            "update notifications will not be delivered. Re-read the resource to get changes.",
+            agent_name,
+        )
     return outcome

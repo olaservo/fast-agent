@@ -43,10 +43,10 @@ class _SubscribableAggregator(_BaseAggregator):
         return None
 
 
-def _make_aggregator(cls):
+def _make_aggregator(cls, *, connection_persistence: bool = False):
     return cls(
         server_names=["demo"],
-        connection_persistence=False,
+        connection_persistence=connection_persistence,
         context=Context(),
     )
 
@@ -55,10 +55,21 @@ def _make_aggregator(cls):
 async def test_subscribe_resource_dispatches_and_records() -> None:
     aggregator = _make_aggregator(_SubscribableAggregator)
 
-    await aggregator.subscribe_resource("file:///demo.txt", "demo")
+    result = await aggregator.subscribe_resource("file:///demo.txt", "demo")
 
     assert aggregator.calls == [("subscribe_resource", "demo", "file:///demo.txt")]
     assert aggregator.get_subscriptions() == {"demo": {"file:///demo.txt"}}
+    # Non-persistent connections cannot receive update notifications.
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_subscribe_returns_true_with_persistent_connection() -> None:
+    aggregator = _make_aggregator(_SubscribableAggregator, connection_persistence=True)
+
+    result = await aggregator.subscribe_resource("file:///demo.txt", "demo")
+
+    assert result is True
 
 
 @pytest.mark.asyncio

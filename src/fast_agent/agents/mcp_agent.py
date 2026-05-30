@@ -1333,7 +1333,7 @@ class McpAgent(ABC, ToolAgent):
 
     async def subscribe_resource(
         self, resource_uri: str, namespace: str | None = None, server_name: str | None = None
-    ) -> None:
+    ) -> bool:
         """
         Subscribe to change notifications for a resource (MCP `resources/subscribe`).
 
@@ -1341,13 +1341,17 @@ class McpAgent(ABC, ToolAgent):
             resource_uri: URI of the resource to subscribe to
             namespace: Namespace (server) that owns the resource (alias for server_name)
 
+        Returns:
+            True if the subscription can receive update notifications; False in non-persistent
+            mode, where the request is sent but no `resources/updated` will be delivered.
+
         Raises:
             ValueError: If the server doesn't exist or doesn't support resource subscriptions
         """
         target = namespace if namespace is not None else server_name
         if target is None:
             raise ValueError("A server namespace is required to subscribe to a resource")
-        await self._aggregator.subscribe_resource(resource_uri, target)
+        return await self._aggregator.subscribe_resource(resource_uri, target)
 
     async def unsubscribe_resource(
         self, resource_uri: str, namespace: str | None = None, server_name: str | None = None

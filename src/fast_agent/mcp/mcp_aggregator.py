@@ -2894,7 +2894,7 @@ class MCPAggregator(ContextDependent):
         resources = capabilities.resources if capabilities else None
         return bool(resources and resources.subscribe)
 
-    async def subscribe_resource(self, resource_uri: str, server_name: str) -> None:
+    async def subscribe_resource(self, resource_uri: str, server_name: str) -> bool:
         """
         Subscribe to change notifications for a single resource (MCP `resources/subscribe`).
 
@@ -2904,6 +2904,11 @@ class MCPAggregator(ContextDependent):
         Args:
             resource_uri: URI of the resource to subscribe to
             server_name: Name of the MCP server that owns the resource
+
+        Returns:
+            True if the subscription can receive update notifications (the aggregator holds a
+            persistent connection); False if it cannot (non-persistent mode), in which case the
+            subscribe request is still sent but no `resources/updated` will ever be delivered.
 
         Raises:
             ValueError: If the server doesn't exist or doesn't advertise `resources.subscribe`
@@ -2946,6 +2951,7 @@ class MCPAggregator(ContextDependent):
             self._subscribed_resources.setdefault(server_name, set()).add(resource_uri)
 
         logger.info(f"Subscribed to resource '{resource_uri}' on server '{server_name}'")
+        return self.connection_persistence
 
     async def unsubscribe_resource(self, resource_uri: str, server_name: str) -> None:
         """
