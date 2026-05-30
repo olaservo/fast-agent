@@ -101,6 +101,11 @@ class AgentCompleter(Completer):
                 "(or /history show|detail|save|load|clear|rewind|fix)"
             ),
             "tools": "List tools",
+            "resources": (
+                "List and subscribe to MCP resources "
+                "(/resources, /resources subscribe, /resources unsubscribe, "
+                "/resources subscriptions)"
+            ),
             "model": (
                 "Inspect/switch models and update runtime settings "
                 "(/model reasoning|task_budget|verbosity|fast|web_search|web_fetch|switch [starts new session]|doctor|references|catalog)"

@@ -21,6 +21,7 @@ from fast_agent.commands.handlers import model as model_handlers
 from fast_agent.commands.handlers import models_manager as models_manager_handlers
 from fast_agent.commands.handlers import plugins as plugins_handlers
 from fast_agent.commands.handlers import prompts as prompt_handlers
+from fast_agent.commands.handlers import resources as resources_handlers
 from fast_agent.commands.handlers import session_export as session_export_handlers
 from fast_agent.commands.handlers import sessions as sessions_handlers
 from fast_agent.commands.handlers import skills as skills_handlers
@@ -73,6 +74,7 @@ from fast_agent.ui.command_payloads import (
     PinSessionCommand,
     PluginsCommand,
     ReloadAgentsCommand,
+    ResourcesCommand,
     ResumeSessionCommand,
     SaveHistoryCommand,
     SelectPromptCommand,
@@ -306,6 +308,16 @@ async def _dispatch_catalog_payload(
         case SkillsCommand(action=action, argument=argument):
             context = build_command_context(prompt_provider, agent)
             outcome = await skills_handlers.handle_skills_command(
+                context,
+                agent_name=agent,
+                action=action,
+                argument=argument,
+            )
+            await emit_command_outcome(context, outcome)
+            return result
+        case ResourcesCommand(action=action, argument=argument):
+            context = build_command_context(prompt_provider, agent)
+            outcome = await resources_handlers.handle_resources_command(
                 context,
                 agent_name=agent,
                 action=action,

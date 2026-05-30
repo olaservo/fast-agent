@@ -354,6 +354,16 @@ class AgentProtocol(LlmAgentProtocol, Protocol):
         self, resource_uri: str, namespace: str | None = None
     ) -> ReadResourceResult: ...
 
+    async def subscribe_resource(
+        self, resource_uri: str, namespace: str | None = None
+    ) -> None: ...
+
+    async def unsubscribe_resource(
+        self, resource_uri: str, namespace: str | None = None
+    ) -> None: ...
+
+    def get_subscriptions(self) -> dict[str, set[str]]: ...
+
     async def with_resource(
         self,
         prompt_content: Union[str, PromptMessage, PromptMessageExtended],

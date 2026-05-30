@@ -39,6 +39,7 @@ from mcp.types import (
     ReadResourceRequestParams,
     ReadResourceResult,
     RequestParams,
+    ResourceUpdatedNotification,
     Result,
     Root,
     SamplingCapability,
@@ -145,6 +146,7 @@ class MCPAgentClientSession(ClientSession, ContextDependent):
         self.session_server_name = kwargs.pop("server_name", None)
         # Extract the notification callbacks if provided
         self._tool_list_changed_callback = kwargs.pop("tool_list_changed_callback", None)
+        self._resource_updated_callback = kwargs.pop("resource_updated_callback", None)
         # Reference to parent aggregator for late-bound notification callback
         self._aggregator = kwargs.pop("aggregator", None)
         # Extract server_config if provided
@@ -948,6 +950,20 @@ class MCPAgentClientSession(ClientSession, ContextDependent):
                     logger.debug(
                         f"Tool list changed for server '{self.session_server_name}' but no callback registered"
                     )
+            case ResourceUpdatedNotification():
+                # Route resource subscription updates to the dedicated callback if registered.
+                if self._resource_updated_callback and self.session_server_name:
+                    uri = str(notification.root.params.uri)
+                    logger.info(
+                        f"Resource '{uri}' updated on server '{self.session_server_name}', triggering callback"
+                    )
+                    asyncio.create_task(
+                        self._handle_resource_updated_callback(self.session_server_name, uri)
+                    )
+                else:
+                    logger.debug(
+                        f"Resource updated on server '{self.session_server_name}' but no callback registered"
+                    )
 
         # Forward non-progress server notifications to the aggregator callback.
         # Progress updates already flow through the request progress callback path.
@@ -981,6 +997,16 @@ class MCPAgentClientSession(ClientSession, ContextDependent):
             await self._tool_list_changed_callback(server_name)
         except Exception as e:
             logger.error(f"Error in tool list changed callback: {e}")
+
+    async def _handle_resource_updated_callback(self, server_name: str, uri: str) -> None:
+        """
+        Helper method to handle resource updated callback in a separate task
+        to prevent blocking the notification handler
+        """
+        try:
+            await self._resource_updated_callback(server_name, uri)
+        except Exception as e:
+            logger.error(f"Error in resource updated callback: {e}")
 
     async def call_tool(
         self,

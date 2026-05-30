@@ -55,6 +55,7 @@ from fast_agent.ui.command_payloads import (
     PinSessionCommand,
     PluginsCommand,
     ReloadAgentsCommand,
+    ResourcesCommand,
     ResumeSessionCommand,
     SaveHistoryCommand,
     SelectPromptCommand,
@@ -596,6 +597,13 @@ def _parse_slash_alias_command(
         action = tokens[0].lower()
         argument = tokens[1].strip() if len(tokens) > 1 else None
         return CardsCommand(action=action, argument=argument)
+    if cmd == "resources":
+        if not remainder:
+            return ResourcesCommand(action="list", argument=None)
+        tokens = remainder.split(maxsplit=1)
+        action = tokens[0].lower()
+        argument = tokens[1].strip() if len(tokens) > 1 else None
+        return ResourcesCommand(action=action, argument=argument)
     if cmd == "plugins":
         if not remainder:
             return PluginsCommand(action="list", argument=None)

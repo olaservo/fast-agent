@@ -46,6 +46,8 @@ def _new_session() -> MCPAgentClientSession:
     session.agent_name = "demo-agent"
     session.session_server_name = "demo-server"
     session.server_config = None
+    session._tool_list_changed_callback = None
+    session._resource_updated_callback = None
     return session
 
 
@@ -458,6 +460,65 @@ async def test_received_notification_schedules_server_notification_callback(
     release.set()
     await notification_tasks[0]
     assert received == [notification]
+
+
+@pytest.mark.asyncio
+async def test_received_notification_invokes_resource_updated_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _noop_parent_notification(
+        self: ClientSession, notification: ServerNotification
+    ) -> None:
+        del self, notification
+
+    monkeypatch.setattr(ClientSession, "_received_notification", _noop_parent_notification)
+
+    calls: list[tuple[str, str]] = []
+
+    async def _callback(server_name: str, uri: str) -> None:
+        calls.append((server_name, uri))
+
+    session = _new_session()
+    session._aggregator = None
+    session._resource_updated_callback = _callback
+
+    notification = ServerNotification(
+        ResourceUpdatedNotification(
+            params=ResourceUpdatedNotificationParams(uri=cast("Any", "file:///demo.txt"))
+        )
+    )
+
+    await session._received_notification(notification)
+    # The callback runs in a spawned task; let the event loop drain it.
+    await asyncio.sleep(0)
+
+    assert calls == [("demo-server", "file:///demo.txt")]
+
+
+@pytest.mark.asyncio
+async def test_received_notification_resource_update_without_callback_is_harmless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _noop_parent_notification(
+        self: ClientSession, notification: ServerNotification
+    ) -> None:
+        del self, notification
+
+    monkeypatch.setattr(ClientSession, "_received_notification", _noop_parent_notification)
+
+    session = _new_session()
+    session._aggregator = None
+    session._resource_updated_callback = None
+
+    notification = ServerNotification(
+        ResourceUpdatedNotification(
+            params=ResourceUpdatedNotificationParams(uri=cast("Any", "file:///demo.txt"))
+        )
+    )
+
+    # Should not raise even though no callback is registered.
+    await session._received_notification(notification)
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

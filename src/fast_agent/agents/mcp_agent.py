@@ -1331,6 +1331,46 @@ class McpAgent(ABC, ToolAgent):
         result: ReadResourceResult = await self._aggregator.get_resource(resource_uri, target)
         return result
 
+    async def subscribe_resource(
+        self, resource_uri: str, namespace: str | None = None, server_name: str | None = None
+    ) -> None:
+        """
+        Subscribe to change notifications for a resource (MCP `resources/subscribe`).
+
+        Args:
+            resource_uri: URI of the resource to subscribe to
+            namespace: Namespace (server) that owns the resource (alias for server_name)
+
+        Raises:
+            ValueError: If the server doesn't exist or doesn't support resource subscriptions
+        """
+        target = namespace if namespace is not None else server_name
+        if target is None:
+            raise ValueError("A server namespace is required to subscribe to a resource")
+        await self._aggregator.subscribe_resource(resource_uri, target)
+
+    async def unsubscribe_resource(
+        self, resource_uri: str, namespace: str | None = None, server_name: str | None = None
+    ) -> None:
+        """
+        Cancel a resource subscription (MCP `resources/unsubscribe`).
+
+        Args:
+            resource_uri: URI of the resource to unsubscribe from
+            namespace: Namespace (server) that owns the resource (alias for server_name)
+
+        Raises:
+            ValueError: If the server doesn't exist or doesn't support resource subscriptions
+        """
+        target = namespace if namespace is not None else server_name
+        if target is None:
+            raise ValueError("A server namespace is required to unsubscribe from a resource")
+        await self._aggregator.unsubscribe_resource(resource_uri, target)
+
+    def get_subscriptions(self) -> dict[str, set[str]]:
+        """Return active resource subscriptions for this agent, keyed by server name."""
+        return self._aggregator.get_subscriptions()
+
     async def with_resource(
         self,
         prompt_content: Union[str, PromptMessage, PromptMessageExtended],

@@ -160,6 +160,13 @@ class SkillsCommand(CommandBase):
 
 
 @dataclass(frozen=True, slots=True)
+class ResourcesCommand(CommandBase):
+    action: str
+    argument: str | None
+    kind: Literal["resources_command"] = "resources_command"
+
+
+@dataclass(frozen=True, slots=True)
 class CardsCommand(CommandBase):
     action: str
     argument: str | None

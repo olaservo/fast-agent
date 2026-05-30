@@ -336,6 +336,76 @@ COMMAND_SPECS: Final[tuple[CommandSpec, ...]] = (
         ),
     ),
     CommandSpec(
+        command="resources",
+        summary="List and subscribe to MCP resources",
+        usage="/resources [list|subscribe|unsubscribe|subscriptions|help] [args]",
+        actions=(
+            CommandActionSpec(
+                action="list",
+                aliases=("ls",),
+                help="List resources grouped by server",
+                usage="/resources list",
+            ),
+            CommandActionSpec(
+                action="subscribe",
+                aliases=("sub",),
+                help="Subscribe to resource update notifications",
+                usage="/resources subscribe <uri> [server]",
+                examples=("/resources subscribe file:///data.txt",),
+                arguments=(
+                    CommandArgumentSpec(
+                        name="uri",
+                        value_name="uri",
+                        summary="Resource URI to subscribe to.",
+                        required=True,
+                    ),
+                    CommandArgumentSpec(
+                        name="server",
+                        value_name="server",
+                        summary="Server that owns the resource (optional if unambiguous).",
+                    ),
+                ),
+            ),
+            CommandActionSpec(
+                action="unsubscribe",
+                aliases=("unsub",),
+                help="Cancel a resource subscription",
+                usage="/resources unsubscribe <uri> [server]",
+                examples=("/resources unsubscribe file:///data.txt",),
+                arguments=(
+                    CommandArgumentSpec(
+                        name="uri",
+                        value_name="uri",
+                        summary="Resource URI to unsubscribe from.",
+                        required=True,
+                    ),
+                    CommandArgumentSpec(
+                        name="server",
+                        value_name="server",
+                        summary="Server that owns the resource (optional if unambiguous).",
+                    ),
+                ),
+            ),
+            CommandActionSpec(
+                action="subscriptions",
+                aliases=("subs",),
+                help="Show active resource subscriptions",
+                usage="/resources subscriptions",
+            ),
+            CommandActionSpec(
+                action="help",
+                aliases=("--help", "-h"),
+                help="Show resources command usage",
+            ),
+        ),
+        default_action="list",
+        examples=(
+            "/resources",
+            "/resources subscribe file:///data.txt",
+            "/resources subscriptions",
+        ),
+    ),
+    CommandSpec(
         command="model",
         summary="Model inspection, switching, and runtime settings",
         usage="/model [reasoning|task_budget|verbosity|fast|web_search|x_search|web_fetch|switch|doctor|references|catalog|help] [args]",

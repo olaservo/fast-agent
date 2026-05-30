@@ -7,9 +7,14 @@ from datetime import datetime
 from typing import Literal
 
 # Display metadata for toolbar summaries (singular, plural, compact label)
-_EVENT_ORDER = ("tool_update", "sampling", "elicitation", "warning")
+_EVENT_ORDER = ("tool_update", "resource_update", "sampling", "elicitation", "warning")
 _EVENT_DISPLAY = {
     "tool_update": {"singular": "tool update", "plural": "tool updates", "compact": "tool"},
+    "resource_update": {
+        "singular": "resource update",
+        "plural": "resource updates",
+        "compact": "res",
+    },
     "sampling": {"singular": "sample", "plural": "samples", "compact": "samp"},
     "elicitation": {"singular": "elicitation", "plural": "elicitations", "compact": "elic"},
     "warning": {"singular": "warning", "plural": "warnings", "compact": "warn"},
@@ -36,6 +41,20 @@ def add_tool_update(server_name: str) -> None:
     notifications.append({
         'type': 'tool_update',
         'server': server_name
+    })
+
+
+def add_resource_update(server_name: str, uri: str) -> None:
+    """Add a resource update notification (MCP `notifications/resources/updated`).
+
+    Args:
+        server_name: Name of the server that emitted the update
+        uri: URI of the resource that changed
+    """
+    notifications.append({
+        'type': 'resource_update',
+        'server': server_name,
+        'uri': uri,
     })
 
 

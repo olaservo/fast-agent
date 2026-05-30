@@ -412,6 +412,11 @@ class MCPAggregator(ContextDependent):
         self._capabilities_cache: dict[str, ServerCapabilities] = {}
         self._capabilities_cache_lock = Lock()
 
+        # Tracks active resource subscriptions per server: server_name -> {resource_uri, ...}
+        # Populated by subscribe_resource / unsubscribe_resource (MCP `resources/subscribe`).
+        self._subscribed_resources: dict[str, set[str]] = {}
+        self._subscription_lock = Lock()
+
         # Focused API for experimental data-layer session metadata controls.
         self.experimental_sessions = ExperimentalSessionClient(self)
 
@@ -590,6 +595,7 @@ class MCPAggregator(ContextDependent):
                 api_key=api_key,
                 elicitation_handler=elicitation_handler,
                 tool_list_changed_callback=self._handle_tool_list_changed,
+                resource_updated_callback=self._handle_resource_updated,
                 aggregator=self,
                 **kwargs,  # Pass through any additional kwargs like server_config
             )
@@ -2881,6 +2887,151 @@ class MCPAggregator(ContextDependent):
             raise ValueError(f"Resource '{resource_uri}' not found on server '{server_name}'")
 
         return result
+
+    async def _server_supports_resource_subscribe(self, server_name: str) -> bool:
+        """Return True if the server advertises the `resources.subscribe` capability."""
+        capabilities = await self.get_capabilities(server_name)
+        resources = capabilities.resources if capabilities else None
+        return bool(resources and resources.subscribe)
+
+    async def subscribe_resource(self, resource_uri: str, server_name: str) -> None:
+        """
+        Subscribe to change notifications for a single resource (MCP `resources/subscribe`).
+
+        After subscribing, the server MAY emit `notifications/resources/updated` for this URI,
+        which is routed to :meth:`_handle_resource_updated`.
+
+        Args:
+            resource_uri: URI of the resource to subscribe to
+            server_name: Name of the MCP server that owns the resource
+
+        Raises:
+            ValueError: If the server doesn't exist or doesn't advertise `resources.subscribe`
+        """
+        if not self.initialized:
+            await self.load_servers()
+
+        if server_name not in self.server_names:
+            raise ValueError(f"Server '{server_name}' not found")
+
+        if not await self._server_supports_resource_subscribe(server_name):
+            raise ValueError(
+                f"Server '{server_name}' does not support resource subscriptions"
+            )
+
+        try:
+            uri = AnyUrl(resource_uri)
+        except Exception as e:
+            raise ValueError(f"Invalid resource URI: {resource_uri}. Error: {e}")
+
+        await self._execute_on_server(
+            server_name=server_name,
+            operation_type="resources/subscribe",
+            operation_name=resource_uri,
+            method_name="subscribe_resource",
+            method_args={"uri": uri},
+        )
+
+        async with self._subscription_lock:
+            self._subscribed_resources.setdefault(server_name, set()).add(resource_uri)
+
+        logger.info(f"Subscribed to resource '{resource_uri}' on server '{server_name}'")
+
+    async def unsubscribe_resource(self, resource_uri: str, server_name: str) -> None:
+        """
+        Cancel a resource subscription (MCP `resources/unsubscribe`).
+
+        Args:
+            resource_uri: URI of the resource to unsubscribe from
+            server_name: Name of the MCP server that owns the resource
+
+        Raises:
+            ValueError: If the server doesn't exist or doesn't advertise `resources.subscribe`
+        """
+        if not self.initialized:
+            await self.load_servers()
+
+        if server_name not in self.server_names:
+            raise ValueError(f"Server '{server_name}' not found")
+
+        if not await self._server_supports_resource_subscribe(server_name):
+            raise ValueError(
+                f"Server '{server_name}' does not support resource subscriptions"
+            )
+
+        try:
+            uri = AnyUrl(resource_uri)
+        except Exception as e:
+            raise ValueError(f"Invalid resource URI: {resource_uri}. Error: {e}")
+
+        await self._execute_on_server(
+            server_name=server_name,
+            operation_type="resources/unsubscribe",
+            operation_name=resource_uri,
+            method_name="unsubscribe_resource",
+            method_args={"uri": uri},
+        )
+
+        async with self._subscription_lock:
+            uris = self._subscribed_resources.get(server_name)
+            if uris is not None:
+                uris.discard(resource_uri)
+                if not uris:
+                    del self._subscribed_resources[server_name]
+
+        logger.info(f"Unsubscribed from resource '{resource_uri}' on server '{server_name}'")
+
+    def get_subscriptions(self) -> dict[str, set[str]]:
+        """Return a copy of the active resource subscriptions, keyed by server name."""
+        return {server: set(uris) for server, uris in self._subscribed_resources.items()}
+
+    async def _handle_resource_updated(self, server_name: str, uri: str) -> None:
+        """
+        Callback handler for `notifications/resources/updated`.
+
+        Behaviour is intentionally "surface + invalidate" — we record/badge the update and call
+        the invalidation hook, but we do NOT automatically re-read the resource. Consumers decide
+        when to re-read (e.g. on next access), which keeps this aligned with the freshness model
+        the upcoming SEPs describe:
+          - SEP-2549 (TTL for List Results): a `notifications/resources/updated` is an *immediate
+            invalidation signal* for a cached `resources/read`. A future TTL cache would mark the
+            `(server_name, uri)` entry stale inside `_on_resource_invalidated`.
+          - SEP-2640 (Skills Extension): a future MCP-backed skill source can subscribe to
+            `skill://index.json` and refresh its skill list from `_on_resource_invalidated`.
+        """
+        logger.info(
+            "Resource updated",
+            data=build_progress_payload(
+                action=ProgressAction.UPDATED,
+                server_name=server_name,
+                agent_name=self.agent_name,
+                extra={"resource_uri": uri},
+            ),
+        )
+
+        # Surface to the UI toolbar (best-effort; never let display failures break notification flow).
+        try:
+            from fast_agent.ui import notification_tracker
+
+            notification_tracker.add_resource_update(server_name, uri)
+        except Exception as e:  # noqa: BLE001 - UI surfacing is best-effort
+            logger.debug(f"Unable to surface resource update for '{server_name}': {e}")
+
+        # Invalidation seam for future TTL cache (SEP-2549) / MCP skills source (SEP-2640).
+        try:
+            await self._on_resource_invalidated(server_name, uri)
+        except Exception as e:  # noqa: BLE001 - hook is optional
+            logger.warning(f"Error in resource invalidation hook for '{server_name}': {e}")
+
+    async def _on_resource_invalidated(self, server_name: str, uri: str) -> None:
+        """
+        Extension hook fired when a subscribed resource changes. Default: no-op.
+
+        This is the single seam where freshness consumers plug in without reworking the
+        notification path (see :meth:`_handle_resource_updated` for the SEP-2549 / SEP-2640
+        rationale). Override or assign in a subclass / future cache layer.
+        """
+        del server_name, uri
 
     async def _list_resources_from_server(
         self, server_name: str, *, check_support: bool = True

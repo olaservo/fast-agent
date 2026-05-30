@@ -369,6 +369,48 @@ class AgentApp:
             resource_uri=resource_uri, namespace=server_name
         )
 
+    async def subscribe_resource(
+        self,
+        resource_uri: str,
+        server_name: str,
+        agent_name: str | None = None,
+    ) -> None:
+        """
+        Subscribe to change notifications for a resource (MCP `resources/subscribe`).
+
+        Args:
+            resource_uri: URI of the resource to subscribe to
+            server_name: Name of the MCP server that owns the resource
+            agent_name: Name of the agent to use
+        """
+        await self._refresh_if_needed()
+        await self._agent(agent_name).subscribe_resource(
+            resource_uri=resource_uri, namespace=server_name
+        )
+
+    async def unsubscribe_resource(
+        self,
+        resource_uri: str,
+        server_name: str,
+        agent_name: str | None = None,
+    ) -> None:
+        """
+        Cancel a resource subscription (MCP `resources/unsubscribe`).
+
+        Args:
+            resource_uri: URI of the resource to unsubscribe from
+            server_name: Name of the MCP server that owns the resource
+            agent_name: Name of the agent to use
+        """
+        await self._refresh_if_needed()
+        await self._agent(agent_name).unsubscribe_resource(
+            resource_uri=resource_uri, namespace=server_name
+        )
+
+    def get_subscriptions(self, agent_name: str | None = None) -> dict[str, set[str]]:
+        """Return active resource subscriptions for an agent, keyed by server name."""
+        return self._agent(agent_name).get_subscriptions()
+
     async def reload_agents(self) -> bool:
         """Reload AgentCards and refresh active instances when available."""
         if not self._reload_callback:
