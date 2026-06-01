@@ -1,0 +1,32 @@
+# Remote variant of token_demo.yaml — points at the live SEP-2200 narrative
+# servers deployed as remote MCP (Streamable HTTP) on Hugging Face Spaces.
+# Requires ANTHROPIC_API_KEY. Free CPU Spaces cold-start, so the first request
+# to each may be slow / need a retry.
+#
+# Serialization mode is driven per run by token_demo_remote.py via the
+# FAST_AGENT_TOOL_RESULT_SERIALIZATION env var.
+
+default_model: "claude-sonnet-4-6"
+
+logger:
+  level: "error"
+  type: "console"
+  show_chat: false
+  show_tools: true
+  truncate_tools: true   # responses are large (~14KB); keep the console readable
+
+mcp:
+  targets:
+    # Anti-pattern: returns content (stringified JSON) AND an identical
+    # structuredContent — pure duplication, ~2x tokens in "both" mode.
+    - name: customer_segmentation
+      target: "https://olaservo-mcp-customer-segmentation.hf.space/mcp"
+      transport: http
+    # The fix.
+    - name: system_monitor
+      target: "https://olaservo-mcp-system-monitor.hf.space/mcp"
+      transport: http
+    # The extreme.
+    - name: video_resource
+      target: "https://olaservo-mcp-video-resource.hf.space/mcp"
+      transport: http
