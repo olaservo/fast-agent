@@ -1,0 +1,22 @@
+# Config for token_demo.py — uses a real Anthropic model so the provider
+# converters actually serialize tool results (passthrough does not), letting us
+# measure token impact. Requires ANTHROPIC_API_KEY in the environment.
+#
+# The serialization mode is NOT set here on purpose: token_demo.py drives it per
+# run via the FAST_AGENT_TOOL_RESULT_SERIALIZATION env var. To pin a mode for an
+# interactive `fast-agent go` session instead, add e.g.:
+#   tool_result_serialization: "both"
+
+default_model: "claude-sonnet-4-6"
+
+logger:
+  level: "error"
+  type: "console"
+  show_chat: false
+  show_tools: true
+  truncate_tools: false
+
+mcp:
+  targets:
+    - name: structured_preview
+      target: "uv run preview_server.py"

@@ -77,3 +77,65 @@ def test_tool_result_text_for_llm_uses_structured_content_json() -> None:
     text = tool_result_text_for_llm(result)
 
     assert text == '{"a":1,"b":2}'
+
+
+def _result_with_both() -> tuple[CallToolResult, TextContent, ImageContent]:
+    image_data = base64.b64encode(b"fake-image").decode("utf-8")
+    text_block = TextContent(type="text", text="stale summary")
+    image_block = ImageContent(type="image", data=image_data, mimeType="image/jpeg")
+    result = CallToolResult(content=[text_block, image_block], isError=False)
+    setattr(result, "structuredContent", {"z": 3, "a": 1})
+    return result, text_block, image_block
+
+
+def test_canonicalize_mode_both_keeps_content_and_appends_structured_json() -> None:
+    result, text_block, image_block = _result_with_both()
+
+    canonical = canonicalize_tool_result_content_for_llm(result, mode="both")
+
+    # Original content (text + non-text) preserved, structured JSON appended last.
+    assert len(canonical) == 3
+    assert canonical[0] is text_block
+    assert canonical[1] is image_block
+    assert isinstance(canonical[2], TextContent)
+    assert canonical[2].text == '{"a":1,"z":3}'
+
+
+def test_canonicalize_mode_content_only_ignores_structured_content() -> None:
+    result, text_block, image_block = _result_with_both()
+
+    canonical = canonicalize_tool_result_content_for_llm(result, mode="content-only")
+
+    # structuredContent is ignored entirely; content returned as-is.
+    assert len(canonical) == 2
+    assert canonical[0] is text_block
+    assert canonical[1] is image_block
+
+
+def test_canonicalize_mode_does_not_warn_in_both_mode() -> None:
+    logger = _LoggerSpy()
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text="first"),
+            TextContent(type="text", text="second"),
+        ],
+        isError=False,
+    )
+    setattr(result, "structuredContent", {"fresh": True})
+
+    canonicalize_tool_result_content_for_llm(result, logger=logger, mode="both")
+
+    # The multi-text-block warning is specific to the structured-wins drop path.
+    assert logger.warning_calls == []
+
+
+def test_canonicalize_env_var_overrides_mode(monkeypatch) -> None:
+    monkeypatch.setenv("FAST_AGENT_TOOL_RESULT_SERIALIZATION", "content-only")
+    result, text_block, image_block = _result_with_both()
+
+    # No explicit mode -> resolver should pick up the env var.
+    canonical = canonicalize_tool_result_content_for_llm(result)
+
+    assert len(canonical) == 2
+    assert canonical[0] is text_block
+    assert canonical[1] is image_block

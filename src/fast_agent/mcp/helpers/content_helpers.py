@@ -4,6 +4,7 @@ Helper functions for working with content objects (Fast Agent namespace).
 """
 
 import json
+import os
 from typing import TYPE_CHECKING, Protocol, Sequence, TypeGuard, Union, cast
 
 if TYPE_CHECKING:
@@ -137,10 +138,37 @@ def text_content(text: str) -> TextContent:
     return TextContent(type="text", text=text)
 
 
+def _resolve_tool_result_serialization_mode(mode: str | None) -> str:
+    """Resolve the effective tool-result serialization mode.
+
+    Precedence: explicit ``mode`` arg > ``FAST_AGENT_TOOL_RESULT_SERIALIZATION``
+    env var > ``Settings.tool_result_serialization`` > ``"structured-wins"``.
+
+    The env var takes precedence over settings so a demo runner can flip modes
+    between runs without fighting the cached ``get_settings()`` singleton.
+    """
+    if mode is not None:
+        return mode
+    env_mode = os.environ.get("FAST_AGENT_TOOL_RESULT_SERIALIZATION")
+    if env_mode:
+        return env_mode
+    try:
+        # Local import to avoid a circular import at module load time.
+        from fast_agent.config import get_settings
+
+        settings_mode = getattr(get_settings(), "tool_result_serialization", None)
+        if settings_mode:
+            return settings_mode
+    except Exception:
+        pass
+    return "structured-wins"
+
+
 def canonicalize_tool_result_content_for_llm(
     result: object,
     logger: ToolResultWarningLogger | None = None,
     source: str | None = None,
+    mode: str | None = None,
 ) -> list[ContentBlock]:
     """Return the canonical LLM-facing content view for a tool result.
 
@@ -148,6 +176,17 @@ def canonicalize_tool_result_content_for_llm(
     but that invariant is not enforced in practice. fast-agent therefore
     prefers `structuredContent` for LLM-facing text when it is present so the
     model sees the same canonical payload that the UI preview favors.
+
+    The selection is governed by the serialization ``mode`` (see
+    :func:`_resolve_tool_result_serialization_mode`):
+
+    - ``"structured-wins"`` (default) — drop ``content`` text blocks and send
+      only the canonical JSON of ``structuredContent`` (plus any non-text blocks).
+    - ``"both"`` — send the original ``content`` blocks AND the canonical JSON,
+      so the model sees everything the server returned (used to demo the token
+      cost and any text/structured divergence).
+    - ``"content-only"`` — ignore ``structuredContent`` entirely and send
+      ``content`` as-is (the behavior most other MCP SDKs exhibit).
     """
 
     raw_content = getattr(result, "content", None)
@@ -159,6 +198,24 @@ def canonicalize_tool_result_content_for_llm(
     if structured_content is None:
         return content
 
+    effective_mode = _resolve_tool_result_serialization_mode(mode)
+
+    if effective_mode == "content-only":
+        return content
+
+    structured_text = json.dumps(
+        structured_content,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    if effective_mode == "both":
+        # Preserve everything the server sent (text + non-text) and append the
+        # canonical structured payload as an additional text block.
+        return [*content, text_content(structured_text)]
+
+    # Default: "structured-wins" — structuredContent replaces the text blocks.
     text_blocks = [item for item in content if is_text_content(item)]
     if logger is not None and len(text_blocks) > 1:
         warning_data: dict[str, object] = {"text_block_count": len(text_blocks)}
@@ -172,12 +229,6 @@ def canonicalize_tool_result_content_for_llm(
         )
 
     non_text_blocks = [item for item in content if not is_text_content(item)]
-    structured_text = json.dumps(
-        structured_content,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     return [text_content(structured_text), *non_text_blocks]
 
 

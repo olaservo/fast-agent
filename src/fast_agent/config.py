@@ -1755,6 +1755,15 @@ class Settings(BaseSettings):
     mcp_ui_output_dir: str = ".fast-agent/ui"
     """Directory where MCP-UI HTML files are written. Relative paths are resolved from CWD."""
 
+    # How a tool result's `content` and `structuredContent` are serialized for the LLM
+    tool_result_serialization: Literal["structured-wins", "both", "content-only"] = "structured-wins"
+    """Controls what reaches the model when a tool result has structuredContent:
+    - "structured-wins": drop content text blocks, send only structuredContent JSON (default)
+    - "both": send the original content blocks AND the structuredContent JSON
+    - "content-only": ignore structuredContent, send content as-is
+    Overridable per-process via the FAST_AGENT_TOOL_RESULT_SERIALIZATION env var.
+    """
+
     mcp_timeline: MCPTimelineSettings = MCPTimelineSettings()
     """Display settings for MCP activity timelines."""
 
