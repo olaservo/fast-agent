@@ -230,6 +230,61 @@ async def test_ui_mixin_enabled_mode_processes_all_content(ui_agent):
 
 
 @pytest.mark.asyncio
+async def test_ui_mixin_preserves_structured_content_without_ui(ui_agent):
+    """Enabled mode must not strip structuredContent from non-UI results.
+
+    Regression: the mixin used to rebuild every result as
+    CallToolResult(content=..., isError=...), silently dropping structuredContent
+    (and meta) so it never reached the provider serialization.
+    """
+    ui_agent.set_ui_mode("enabled")
+
+    text_block = create_non_ui_resource()
+    tool_results = {
+        "tool1": CallToolResult(
+            content=[text_block],
+            structuredContent={"status": "open", "value": 3},
+            isError=False,
+        )
+    }
+    request = PromptMessageExtended(
+        role="user", content=[TextContent(type="text", text="test")], tool_results=tool_results
+    )
+
+    result = await ui_agent.run_tools(request)
+
+    assert result.tool_results["tool1"].structuredContent == {"status": "open", "value": 3}
+    assert result.tool_results["tool1"].content == [text_block]
+
+
+@pytest.mark.asyncio
+async def test_ui_mixin_preserves_structured_content_when_extracting_ui(ui_agent):
+    """structuredContent must survive even when UI blocks are extracted from the result."""
+    ui_agent.set_ui_mode("enabled")
+
+    ui_resource = create_ui_resource()
+    text_block = create_non_ui_resource()
+    tool_results = {
+        "tool1": CallToolResult(
+            content=[ui_resource, text_block],
+            structuredContent={"status": "open"},
+            isError=False,
+        )
+    }
+    request = PromptMessageExtended(
+        role="user", content=[TextContent(type="text", text="test")], tool_results=tool_results
+    )
+
+    result = await ui_agent.run_tools(request)
+
+    # UI block extracted to the channel...
+    assert result.channels[MCP_UI] == [ui_resource]
+    # ...but the cleaned result keeps its structuredContent and non-UI content.
+    assert result.tool_results["tool1"].structuredContent == {"status": "open"}
+    assert result.tool_results["tool1"].content == [text_block]
+
+
+@pytest.mark.asyncio
 async def test_show_assistant_message_displays_ui_resources(ui_agent):
     """Test that show_assistant_message triggers UI resource display."""
     # Set up message history with UI resources

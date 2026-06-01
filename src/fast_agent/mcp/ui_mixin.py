@@ -251,9 +251,14 @@ class McpUIMixin:
                 ui_blocks, other_blocks = self._split_ui_blocks(list(result.content or []))
                 if ui_blocks:
                     extracted_ui.extend(ui_blocks)
-
-                # Recreate CallToolResult without UI blocks
-                new_results[key] = CallToolResult(content=other_blocks, isError=result.isError)
+                    # Rebuild without the UI blocks, but preserve every other field
+                    # (structuredContent, meta, and any extra attributes) via model_copy.
+                    # A bare CallToolResult(content=...) would silently drop them.
+                    new_results[key] = result.model_copy(update={"content": other_blocks})
+                else:
+                    # No UI blocks — pass the original result through untouched so
+                    # structuredContent/meta survive to the provider serialization.
+                    new_results[key] = result
             except Exception:
                 # Pass through untouched on any error
                 new_results[key] = result
