@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
+from fast_agent.skills import provenance
 from fast_agent.skills.models import (
+    SKILL_SOURCE_FILENAME,
     SKILL_SOURCE_SCHEMA_VERSION,
     InstalledSkillSource,
     MarketplaceSkill,
@@ -17,6 +20,8 @@ from fast_agent.skills.provenance import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 def test_installed_skill_source_round_trip(tmp_path: Path) -> None:
@@ -83,8 +88,12 @@ def test_detect_skill_drift_drifted(tmp_path: Path) -> None:
     (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
     _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
 
-    # Locally modify the cached content after recording its fingerprint.
+    # Locally modify the cached content after recording its fingerprint, and
+    # ensure its mtime is clearly newer than the sidecar so the fast-path
+    # engages deterministically regardless of filesystem mtime resolution.
     (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\ntampered\n", encoding="utf-8")
+    newer = (skill_dir / SKILL_SOURCE_FILENAME).stat().st_mtime + 1000
+    os.utime(skill_dir / "SKILL.md", (newer, newer))
 
     assert detect_skill_drift(skill_dir) == "drifted"
 
@@ -95,6 +104,28 @@ def test_detect_skill_drift_unknown_when_unmanaged(tmp_path: Path) -> None:
     (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
 
     assert detect_skill_drift(skill_dir) == "unknown"
+
+
+def test_detect_skill_drift_skips_hash_when_unmodified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+    _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
+
+    # Make the sidecar newer than all content so the mtime fast-path engages.
+    sidecar = skill_dir / SKILL_SOURCE_FILENAME
+    future = sidecar.stat().st_mtime + 1000
+    os.utime(sidecar, (future, future))
+    os.utime(skill_dir, (future, future))
+
+    def _should_not_run(_skill_dir: Path) -> str:
+        raise AssertionError("content hash must be skipped for an unmodified skill")
+
+    monkeypatch.setattr(provenance, "compute_skill_content_fingerprint", _should_not_run)
+
+    assert detect_skill_drift(skill_dir) == "clean"
 
 
 def test_build_installed_skill_source_uses_local_revision_without_commit() -> None:

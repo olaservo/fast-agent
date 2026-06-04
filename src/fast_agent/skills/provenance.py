@@ -50,7 +50,11 @@ def compute_skill_content_fingerprint(skill_dir: Path) -> str:
 SkillDriftStatus = Literal["clean", "drifted", "unknown"]
 
 
-def detect_skill_drift(skill_dir: Path) -> SkillDriftStatus:
+def detect_skill_drift(
+    skill_dir: Path,
+    *,
+    source: InstalledSkillSource | None = None,
+) -> SkillDriftStatus:
     """Compare a managed skill's on-disk content against its recorded fingerprint.
 
     Implements the cached-content drift signal called for by the SEP-2640
@@ -62,15 +66,49 @@ def detect_skill_drift(skill_dir: Path) -> SkillDriftStatus:
     matches, and ``"unknown"`` when the skill is unmanaged or has no recorded
     fingerprint to compare against. This check is local-only and never contacts
     the source server.
+
+    Pass ``source`` when the caller already loaded the sidecar to avoid a
+    redundant read. The full content hash is skipped via a cheap mtime check
+    when nothing in the tree has changed since install (see
+    :func:`_content_modified_since_install`); this only gates the convenience
+    warning — integrity of fetched content is still verified by a full hash at
+    install/update time.
     """
-    source, _error = read_installed_skill_source(skill_dir)
+    if source is None:
+        source, _error = read_installed_skill_source(skill_dir)
     if source is None or not source.content_fingerprint:
         return "unknown"
     try:
+        if not _content_modified_since_install(skill_dir):
+            return "clean"
         current = compute_skill_content_fingerprint(skill_dir)
     except OSError:
         return "unknown"
     return "clean" if current == source.content_fingerprint else "drifted"
+
+
+def _content_modified_since_install(skill_dir: Path) -> bool:
+    """Best-effort check for whether skill content changed since the sidecar was written.
+
+    The sidecar is written last at install/update time, so its mtime marks the
+    end of install. Any later in-place edit bumps the edited file's mtime, and
+    any addition or deletion bumps the containing directory's mtime, so a tree
+    walk comparing every entry (and the root) against the sidecar mtime catches
+    edits, additions, and deletions. Returns ``True`` (forcing a full hash) when
+    in doubt. The only blind spot is a deliberately mtime-preserving edit, which
+    is acceptable for a convenience warning.
+    """
+    root = skill_dir.resolve()
+    sidecar_path = get_skill_source_sidecar_path(root)
+    sidecar_mtime = sidecar_path.stat().st_mtime
+    if root.stat().st_mtime > sidecar_mtime:
+        return True
+    for path in root.rglob("*"):
+        if path == sidecar_path:
+            continue
+        if path.stat().st_mtime > sidecar_mtime:
+            return True
+    return False
 
 
 def read_installed_skill_source(skill_dir: Path) -> tuple[InstalledSkillSource | None, str | None]:
@@ -172,7 +210,10 @@ def format_installed_at_display(installed_at: str | None) -> str:
 
 
 def format_skill_provenance_details(skill_dir: Path) -> tuple[str, str | None]:
-    provenance = get_skill_provenance(skill_dir)
+    return format_provenance_details(get_skill_provenance(skill_dir))
+
+
+def format_provenance_details(provenance: SkillProvenance) -> tuple[str, str | None]:
     if provenance.status == "unmanaged":
         return "unmanaged.", None
     if provenance.status != "managed" or provenance.source is None:

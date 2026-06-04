@@ -48,8 +48,10 @@ from fast_agent.skills.provenance import (
     compute_skill_content_fingerprint,
     detect_skill_drift,
     format_installed_at_display,
+    format_provenance_details,
     format_revision_short,
     format_skill_provenance_details,
+    get_skill_provenance,
     read_installed_skill_source,
 )
 from fast_agent.skills.registry import SkillManifest, SkillRegistry, format_skills_for_prompt
@@ -134,7 +136,8 @@ def _append_manifest_entry(content: Text, manifest: SkillManifest, index: int) -
     content.append("     ", style="dim")
     content.append(f"source: {source_display}", style="dim green")
     content.append("\n")
-    provenance_text, installed_text = format_skill_provenance_details(source_path)
+    provenance = get_skill_provenance(source_path)
+    provenance_text, installed_text = format_provenance_details(provenance)
     content.append("     ", style="dim")
     content.append(f"provenance: {provenance_text}", style="dim")
     content.append("\n")
@@ -142,7 +145,7 @@ def _append_manifest_entry(content: Text, manifest: SkillManifest, index: int) -
         content.append("     ", style="dim")
         content.append(f"installed: {installed_text}", style="dim")
         content.append("\n")
-    if detect_skill_drift(source_path) == "drifted":
+    if detect_skill_drift(source_path, source=provenance.source) == "drifted":
         content.append("     ", style="dim")
         content.append(
             "drift: local content modified since install (sha256 mismatch)",
