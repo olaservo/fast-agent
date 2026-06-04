@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fast_agent.marketplace import formatting as marketplace_formatting
 from fast_agent.marketplace import source_utils as marketplace_source_utils
@@ -45,6 +45,32 @@ def compute_skill_content_fingerprint(skill_dir: Path) -> str:
         digest.update(b"\0")
 
     return f"sha256:{digest.hexdigest()}"
+
+
+SkillDriftStatus = Literal["clean", "drifted", "unknown"]
+
+
+def detect_skill_drift(skill_dir: Path) -> SkillDriftStatus:
+    """Compare a managed skill's on-disk content against its recorded fingerprint.
+
+    Implements the cached-content drift signal called for by the SEP-2640
+    ``digest`` decision: a client compares the digest captured at install time
+    against the current content and warns when the cached skill has changed.
+
+    Returns ``"drifted"`` when the installed content no longer matches the
+    ``content_fingerprint`` recorded at install time, ``"clean"`` when it
+    matches, and ``"unknown"`` when the skill is unmanaged or has no recorded
+    fingerprint to compare against. This check is local-only and never contacts
+    the source server.
+    """
+    source, _error = read_installed_skill_source(skill_dir)
+    if source is None or not source.content_fingerprint:
+        return "unknown"
+    try:
+        current = compute_skill_content_fingerprint(skill_dir)
+    except OSError:
+        return "unknown"
+    return "clean" if current == source.content_fingerprint else "drifted"
 
 
 def read_installed_skill_source(skill_dir: Path) -> tuple[InstalledSkillSource | None, str | None]:

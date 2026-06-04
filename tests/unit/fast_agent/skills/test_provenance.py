@@ -9,6 +9,8 @@ from fast_agent.skills.models import (
 )
 from fast_agent.skills.provenance import (
     build_installed_skill_source,
+    compute_skill_content_fingerprint,
+    detect_skill_drift,
     read_installed_skill_source,
     write_installed_skill_source,
 )
@@ -41,6 +43,58 @@ def test_installed_skill_source_round_trip(tmp_path: Path) -> None:
 
     assert error is None
     assert loaded == source
+
+
+def _write_mcp_source(skill_dir: Path, *, fingerprint: str) -> None:
+    write_installed_skill_source(
+        skill_dir,
+        InstalledSkillSource(
+            schema_version=SKILL_SOURCE_SCHEMA_VERSION,
+            installed_via="mcp",
+            source_origin="mcp",
+            repo_url="mcp://example-server",
+            repo_ref=None,
+            repo_path="skill://alpha/SKILL.md",
+            source_url="skill://alpha/SKILL.md",
+            installed_commit=None,
+            installed_path_oid=None,
+            installed_revision="sha256:" + "a" * 64,
+            installed_at="2026-06-02T12:00:00Z",
+            content_fingerprint=fingerprint,
+            mcp_server_name="example-server",
+            artifact_digest="sha256:" + "a" * 64,
+            artifact_type="skill-md",
+        ),
+    )
+
+
+def test_detect_skill_drift_clean(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+    _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
+
+    assert detect_skill_drift(skill_dir) == "clean"
+
+
+def test_detect_skill_drift_drifted(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+    _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
+
+    # Locally modify the cached content after recording its fingerprint.
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\ntampered\n", encoding="utf-8")
+
+    assert detect_skill_drift(skill_dir) == "drifted"
+
+
+def test_detect_skill_drift_unknown_when_unmanaged(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+
+    assert detect_skill_drift(skill_dir) == "unknown"
 
 
 def test_build_installed_skill_source_uses_local_revision_without_commit() -> None:
