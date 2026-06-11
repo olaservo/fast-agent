@@ -45,13 +45,12 @@ from fast_agent.skills.operations import (
     select_skill_updates,
 )
 from fast_agent.skills.provenance import (
+    DRIFT_WARNING_DETAIL,
     compute_skill_content_fingerprint,
     detect_skill_drift,
     format_installed_at_display,
-    format_provenance_details,
     format_revision_short,
-    format_skill_provenance_details,
-    get_skill_provenance,
+    format_skill_display_details,
     read_installed_skill_source,
 )
 from fast_agent.skills.registry import SkillManifest, SkillRegistry, format_skills_for_prompt
@@ -136,8 +135,7 @@ def _append_manifest_entry(content: Text, manifest: SkillManifest, index: int) -
     content.append("     ", style="dim")
     content.append(f"source: {source_display}", style="dim green")
     content.append("\n")
-    provenance = get_skill_provenance(source_path)
-    provenance_text, installed_text = format_provenance_details(provenance)
+    provenance_text, installed_text, drift_detail = format_skill_display_details(source_path)
     content.append("     ", style="dim")
     content.append(f"provenance: {provenance_text}", style="dim")
     content.append("\n")
@@ -145,12 +143,9 @@ def _append_manifest_entry(content: Text, manifest: SkillManifest, index: int) -
         content.append("     ", style="dim")
         content.append(f"installed: {installed_text}", style="dim")
         content.append("\n")
-    if detect_skill_drift(source_path, source=provenance.source) == "drifted":
+    if drift_detail:
         content.append("     ", style="dim")
-        content.append(
-            "drift: local content modified since install (sha256 mismatch)",
-            style="yellow",
-        )
+        content.append(f"drift: {drift_detail}", style="yellow")
         content.append("\n")
     content.append("\n")
 
@@ -348,8 +343,15 @@ def _format_update_results(updates: Sequence[SkillUpdateInfo], *, title: str) ->
                 f"{format_installed_at_display(source.installed_at)} "
                 f"revision: {format_revision_short(source.installed_revision)}"
             )
+            drift_detail = (
+                DRIFT_WARNING_DETAIL
+                if detect_skill_drift(update.skill_dir, source=source) == "drifted"
+                else None
+            )
         else:
-            provenance_text, installed_text = format_skill_provenance_details(update.skill_dir)
+            provenance_text, installed_text, drift_detail = format_skill_display_details(
+                update.skill_dir
+            )
 
         content.append(detail_prefix, style="dim")
         content.append(f"provenance: {provenance_text}", style="dim")
@@ -357,6 +359,10 @@ def _format_update_results(updates: Sequence[SkillUpdateInfo], *, title: str) ->
         if installed_text:
             content.append(detail_prefix, style="dim")
             content.append(f"installed: {installed_text}", style="dim")
+            content.append("\n")
+        if drift_detail:
+            content.append(detail_prefix, style="dim")
+            content.append(f"drift: {drift_detail}", style="yellow")
             content.append("\n")
 
         if update.current_revision or update.available_revision:

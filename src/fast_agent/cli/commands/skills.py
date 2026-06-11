@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from fast_agent.cli.command_support import (
     ensure_context_object,
@@ -37,7 +38,7 @@ from fast_agent.skills.operations import (
     select_manifest_by_name_or_index,
     select_skill_updates,
 )
-from fast_agent.skills.provenance import format_revision_short, format_skill_provenance_details
+from fast_agent.skills.provenance import format_revision_short, format_skill_display_details
 from fast_agent.skills.registry import SkillManifest, SkillRegistry
 from fast_agent.skills.scope import (
     get_manager_directory,
@@ -124,11 +125,15 @@ def _print_skill_table(
 
     for index, manifest in enumerate(manifests, 1):
         source_path = manifest.path.parent if manifest.path.is_file() else manifest.path
-        provenance_text, installed_text = format_skill_provenance_details(source_path)
+        provenance_text, installed_text, drift_detail = format_skill_display_details(source_path)
+        provenance_cell: str | Text = provenance_text
+        if drift_detail:
+            provenance_cell = Text(provenance_text)
+            provenance_cell.append(f"\ndrift: {drift_detail}", style="yellow")
         row = [
             manifest.name,
             format_display_path(source_path),
-            provenance_text,
+            provenance_cell,
             installed_text or "—",
         ]
         if show_index:

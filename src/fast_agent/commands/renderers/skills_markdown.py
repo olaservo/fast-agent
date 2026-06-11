@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from fast_agent.skills.command_support import SKILLS_ADD_HINT_SLASH
-from fast_agent.skills.provenance import format_skill_provenance_details
+from fast_agent.skills.provenance import format_skill_display_details
 
 if TYPE_CHECKING:
     from fast_agent.skills.models import MarketplaceSkill
@@ -22,6 +22,7 @@ def _format_skill_entry(
     source: str | None,
     provenance: str | None,
     installed: str | None,
+    drift: str | None = None,
 ) -> list[str]:
     lines: list[str] = [f"{index}. **{name}**"]
     if description:
@@ -39,6 +40,9 @@ def _format_skill_entry(
     if installed:
         lines.append("    > **Installed:**")
         lines.append(f"    > {installed}")
+    if drift:
+        lines.append("    > **Drift:**")
+        lines.append(f"    > ⚠️ {drift}")
 
     lines.append("")
     return lines
@@ -58,7 +62,7 @@ def render_skill_list(manifests: Sequence[SkillManifest], *, cwd: Path | None = 
     for index, manifest in enumerate(manifests, 1):
         source_path = manifest.path.parent if manifest.path.is_file() else manifest.path
         display_path = _display_path(source_path, cwd=cwd)
-        provenance, installed = format_skill_provenance_details(source_path)
+        provenance, installed, drift = format_skill_display_details(source_path)
         lines.extend(
             _format_skill_entry(
                 index=index,
@@ -67,6 +71,7 @@ def render_skill_list(manifests: Sequence[SkillManifest], *, cwd: Path | None = 
                 source=f"`{display_path}`",
                 provenance=provenance,
                 installed=installed,
+                drift=drift,
             )
         )
 
@@ -98,7 +103,7 @@ def render_skills_by_directory(
             skill_index += 1
             source_path = manifest.path.parent if manifest.path.is_file() else manifest.path
             source_display = _display_path(source_path, cwd=cwd)
-            provenance, installed = format_skill_provenance_details(source_path)
+            provenance, installed, drift = format_skill_display_details(source_path)
             lines.extend(
                 _format_skill_entry(
                     index=skill_index,
@@ -107,6 +112,7 @@ def render_skills_by_directory(
                     source=f"`{source_display}`",
                     provenance=provenance,
                     installed=installed,
+                    drift=drift,
                 )
             )
 
@@ -146,7 +152,7 @@ def render_skills_remove_list(
     for index, manifest in enumerate(manifests, 1):
         source_path = manifest.path.parent if manifest.path.is_file() else manifest.path
         source_display = _display_path(source_path, cwd=cwd)
-        provenance, installed = format_skill_provenance_details(source_path)
+        provenance, installed, drift = format_skill_display_details(source_path)
         lines.extend(
             _format_skill_entry(
                 index=index,
@@ -155,6 +161,7 @@ def render_skills_remove_list(
                 source=f"`{source_display}`",
                 provenance=provenance,
                 installed=installed,
+                drift=drift,
             )
         )
 

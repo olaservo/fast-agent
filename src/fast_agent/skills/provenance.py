@@ -95,8 +95,11 @@ def _content_modified_since_install(skill_dir: Path) -> bool:
     any addition or deletion bumps the containing directory's mtime, so a tree
     walk comparing every entry (and the root) against the sidecar mtime catches
     edits, additions, and deletions. Returns ``True`` (forcing a full hash) when
-    in doubt. The only blind spot is a deliberately mtime-preserving edit, which
-    is acceptable for a convenience warning.
+    in doubt. Blind spots are a deliberately mtime-preserving edit and an edit
+    that lands within the filesystem's mtime granularity of the sidecar write
+    (so its mtime is not strictly newer); both are acceptable for a convenience
+    warning, and neither weakens the full-hash integrity check done at
+    install/update time.
     """
     root = skill_dir.resolve()
     sidecar_path = get_skill_source_sidecar_path(root)
@@ -207,6 +210,30 @@ def format_revision_short(revision: str | None) -> str:
 
 def format_installed_at_display(installed_at: str | None) -> str:
     return marketplace_formatting.format_installed_at_display(installed_at)
+
+
+DRIFT_WARNING_DETAIL = "local content modified since install (sha256 mismatch)"
+
+
+def format_skill_display_details(skill_dir: Path) -> tuple[str, str | None, str | None]:
+    """Return ``(provenance_text, installed_text, drift_detail)`` from one sidecar read.
+
+    ``drift_detail`` is :data:`DRIFT_WARNING_DETAIL` when the managed skill's
+    on-disk content no longer matches its recorded fingerprint, otherwise
+    ``None``. Consolidates the provenance, installed, and drift lookups so every
+    display surface renders a consistent signal from a single sidecar read: the
+    loaded ``source`` is handed to :func:`detect_skill_drift`, and the drift
+    check is skipped entirely for unmanaged skills (no recorded source).
+    """
+    provenance = get_skill_provenance(skill_dir)
+    provenance_text, installed_text = format_provenance_details(provenance)
+    drift_detail: str | None = None
+    if (
+        provenance.source is not None
+        and detect_skill_drift(skill_dir, source=provenance.source) == "drifted"
+    ):
+        drift_detail = DRIFT_WARNING_DETAIL
+    return provenance_text, installed_text, drift_detail
 
 
 def format_skill_provenance_details(skill_dir: Path) -> tuple[str, str | None]:

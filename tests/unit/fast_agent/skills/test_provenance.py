@@ -11,9 +11,11 @@ from fast_agent.skills.models import (
     MarketplaceSkill,
 )
 from fast_agent.skills.provenance import (
+    DRIFT_WARNING_DETAIL,
     build_installed_skill_source,
     compute_skill_content_fingerprint,
     detect_skill_drift,
+    format_skill_display_details,
     read_installed_skill_source,
     write_installed_skill_source,
 )
@@ -126,6 +128,52 @@ def test_detect_skill_drift_skips_hash_when_unmodified(
     monkeypatch.setattr(provenance, "compute_skill_content_fingerprint", _should_not_run)
 
     assert detect_skill_drift(skill_dir) == "clean"
+
+
+def test_format_skill_display_details_clean_has_no_drift(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+    _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
+
+    provenance_text, _installed_text, drift_detail = format_skill_display_details(skill_dir)
+
+    assert provenance_text
+    assert drift_detail is None
+
+
+def test_format_skill_display_details_reports_drift(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+    _write_mcp_source(skill_dir, fingerprint=compute_skill_content_fingerprint(skill_dir))
+
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\ntampered\n", encoding="utf-8")
+    newer = (skill_dir / SKILL_SOURCE_FILENAME).stat().st_mtime + 1000
+    os.utime(skill_dir / "SKILL.md", (newer, newer))
+
+    _provenance_text, _installed_text, drift_detail = format_skill_display_details(skill_dir)
+
+    assert drift_detail == DRIFT_WARNING_DETAIL
+
+
+def test_format_skill_display_details_unmanaged_skips_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n", encoding="utf-8")
+
+    def _should_not_run(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("drift must not be probed for an unmanaged skill")
+
+    monkeypatch.setattr(provenance, "detect_skill_drift", _should_not_run)
+
+    provenance_text, installed_text, drift_detail = format_skill_display_details(skill_dir)
+
+    assert provenance_text == "unmanaged."
+    assert installed_text is None
+    assert drift_detail is None
 
 
 def test_build_installed_skill_source_uses_local_revision_without_commit() -> None:
