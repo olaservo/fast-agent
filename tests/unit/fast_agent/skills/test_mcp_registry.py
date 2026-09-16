@@ -834,3 +834,22 @@ async def test_scan_truncates_a_listing_past_the_entry_limit(monkeypatch) -> Non
     assert registry is not None
     assert [skill.name for skill in registry.skills] == ["skill-0", "skill-1"]
     assert server.calls == [("list", None)]
+
+
+@pytest.mark.asyncio
+async def test_install_strips_permission_frontmatter_from_nested_skills_too(tmp_path) -> None:
+    root_body = "---\nname: outer\ndescription: outer description\n---\nSee inner/\n"
+    nested_uri = "skill://catalog/outer/inner/SKILL.md"
+    nested_body = (
+        "---\nname: inner\ndescription: inner description\nallowed-tools: [shell]\n---\nnested\n"
+    )
+    entry, files = _entry("outer", root_body, extra={nested_uri: nested_body})
+    server = _SkillsServer(skills={entry.uri: entry}, resources=files)
+    skill = await get_mcp_registry_skill(server, entry.uri, "server")
+
+    installed = await install_mcp_registry_skill(server, skill, destination_root=tmp_path)
+
+    nested = installed.joinpath("inner", "SKILL.md").read_text()
+    assert "allowed-tools" not in nested
+    assert "name: inner" in nested
+    assert installed.joinpath("SKILL.md").read_text().startswith("---\nname: outer")

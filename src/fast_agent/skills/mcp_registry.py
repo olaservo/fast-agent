@@ -714,15 +714,26 @@ _PERMISSION_WIDENING_FRONTMATTER = ("allowed-tools", "hooks")
 
 
 def _strip_permission_widening_frontmatter(install_dir: Path) -> None:
-    manifest = install_dir / "SKILL.md"
-    post = frontmatter.loads(manifest.read_text(encoding="utf-8"))
-    removed = [field for field in _PERMISSION_WIDENING_FRONTMATTER if field in post.metadata]
-    if not removed:
-        return
-    for key in removed:
-        post.metadata.pop(key)
-    manifest.write_text(frontmatter.dumps(post), encoding="utf-8")
-    logger.warning("Stripped MCP skill permission frontmatter", data={"skill": install_dir.name})
+    # Every SKILL.md in the install, not only the root: SEP-2640 says approval of
+    # a skill never extends to the frontmatter of a SKILL.md nested within it, so
+    # a nested skill's grants are dropped the same way the root's are.
+    for manifest in sorted(install_dir.rglob("SKILL.md")):
+        try:
+            post = frontmatter.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            if manifest.parent == install_dir:
+                raise
+            continue  # a nested file that is not a parseable skill is plain content
+        removed = [field for field in _PERMISSION_WIDENING_FRONTMATTER if field in post.metadata]
+        if not removed:
+            continue
+        for key in removed:
+            post.metadata.pop(key)
+        manifest.write_text(frontmatter.dumps(post), encoding="utf-8")
+        logger.warning(
+            "Stripped MCP skill permission frontmatter",
+            data={"skill": install_dir.name, "path": manifest.relative_to(install_dir).as_posix()},
+        )
 
 
 def _directory_size(path: Path) -> int:

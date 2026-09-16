@@ -81,10 +81,13 @@ on demand, and the following follow from that choice:
 - A skill installed from an MCP server carries an `<origin>` element in the
   model's skill listing, and a same-named skill from another origin (the local
   filesystem or another server) is listed alongside it rather than replaced.
-- `allowed-tools` and `hooks` are removed from an installed MCP skill's
-  frontmatter. There is no per-skill approval gate on code-execution tool calls
-  while the model is acting on an MCP skill; the SEP's "acting window" is not
-  modelled.
+- `allowed-tools` and `hooks` are removed from every `SKILL.md` in an installed
+  MCP skill, nested ones included. There is no per-skill approval gate on
+  code-execution tool calls while the model is acting on an MCP skill; the SEP's
+  "acting window" is not modelled.
+- Digests are checked over the bytes `resources/read` returns. A file served as
+  text is re-encoded as UTF-8 before hashing, so a server must serve any file
+  that is not valid UTF-8 as a blob, or its digest will not match.
 - A server's installed skills may total at most 200 MiB on disk. This is host
   policy, not a SEP limit. A `skills/list` longer than 10,000 entries or 1,000
   pages is truncated with a warning.
