@@ -33,6 +33,7 @@ from fast_agent.core.exceptions import ServerSessionTerminatedError
 from fast_agent.mcp.skills_extension import (
     DirectoryReadRequest,
     DirectoryReadRequestParams,
+    DirectoryReadResult,
     GetSkillRequest,
     GetSkillRequestParams,
     GetSkillResult,
@@ -298,9 +299,9 @@ class MCPClientConnection:
         uri: str,
         *,
         cursor: str | None = None,
-    ) -> ListResourcesResult:
+    ) -> DirectoryReadResult:
         request = DirectoryReadRequest(params=DirectoryReadRequestParams(uri=uri, cursor=cursor))
-        return await self._request(self.client.session.send_request(request, ListResourcesResult))
+        return await self._request(self.client.session.send_request(request, DirectoryReadResult))
 
     async def _request(self, operation: Awaitable[T]) -> T:
         try:

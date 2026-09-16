@@ -160,6 +160,7 @@ class SkillsResponseStreamableHTTPSimulator(StatefulStreamableHTTPSimulator):
                 {
                     "uri": "skill://demo/SKILL.md",
                     "digest": "sha256:abc",
+                    "size": 12,
                 }
             ],
         }
@@ -581,7 +582,10 @@ async def test_skills_extension_requests_and_parses_results() -> None:
     assert listed.ttl_ms == 30_000
     assert listed.cache_scope == "public"
     assert listed.skills[0].resources is not None
-    assert listed.skills[0].resources[0].digest == "sha256:abc"
+    listed_resources = listed.skills[0].resources
+    assert isinstance(listed_resources, list)
+    assert listed_resources[0].digest == "sha256:abc"
+    assert listed_resources[0].size == 12
     assert isinstance(skill, GetSkillResult)
     assert skill.skill.frontmatter["name"] == "demo"
 

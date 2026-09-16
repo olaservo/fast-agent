@@ -11,7 +11,12 @@ from fast_agent.context import Context
 from fast_agent.event_progress import ProgressAction
 from fast_agent.mcp.app_integrations import AppServerConfig
 from fast_agent.mcp.mcp_aggregator import MCPAggregator
-from fast_agent.mcp.skills_extension import GetSkillResult, ListSkillsResult, SkillEntry
+from fast_agent.mcp.skills_extension import (
+    GetSkillResult,
+    ListSkillsResult,
+    SkillEntry,
+    SkillResource,
+)
 
 if TYPE_CHECKING:
     from mcp.client import CacheMode
@@ -206,6 +211,13 @@ async def test_skills_extension_routes_requests_to_the_named_server() -> None:
             entry = SkillEntry(
                 uri="skill://demo/SKILL.md",
                 frontmatter={"name": "demo", "description": "Demo skill"},
+                resources=[
+                    SkillResource(
+                        uri="skill://demo/SKILL.md",
+                        digest="sha256:" + "0" * 64,
+                        size=0,
+                    )
+                ],
             )
             if method_name == "list_skills":
                 return ListSkillsResult(skills=[entry])

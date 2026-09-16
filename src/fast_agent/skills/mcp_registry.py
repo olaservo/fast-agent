@@ -20,6 +20,7 @@ from mcp_types import BlobResourceContents, ServerCapabilities, TextResourceCont
 
 from fast_agent.core.logging.logger import get_logger
 from fast_agent.marketplace import git_sources as marketplace_git_sources
+from fast_agent.mcp.skills_extension import DYNAMIC_RESOURCES
 from fast_agent.skills.models import (
     SKILL_NAME_PATTERN,
     SKILL_SOURCE_FILENAME,
@@ -68,13 +69,20 @@ logger = get_logger(__name__)
 SKILLS_EXTENSION = "io.modelcontextprotocol/skills"
 MAX_LIST_PAGES = 1_000
 MAX_LIST_ENTRIES = 10_000
-MAX_SKILL_RESOURCES = 10_000
+# SEP-2640 "Limits": every conforming host MUST accept a skill up to these bounds, and
+# a server SHOULD NOT serve one that exceeds them. Both are checkable from the entry
+# alone (count the resources, sum their sizes) before any file is fetched.
+MAX_SKILL_RESOURCES = 512
+MAX_SKILL_BYTES = 16 * 1_048_576
+# A single file can legitimately be the whole 16 MiB budget.
+MAX_RESOURCE_BYTES = MAX_SKILL_BYTES
 MAX_SKILL_MD_BYTES = 262_144
-MAX_RESOURCE_BYTES = 10 * 1_048_576
-MAX_SKILL_BYTES = 50 * 1_048_576
 MAX_SERVER_SKILL_BYTES = 200 * 1_048_576
 MAX_RESOURCE_PATH_LENGTH = 1_024
+MAX_INSTALL_DIR_SERVER_SEGMENT = 48
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_INSTALL_DIR_SEPARATOR = "--"
+_UNSAFE_DIR_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -86,6 +94,15 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 
 @dataclass(frozen=True)
 class McpRegistrySkill:
+    """A skill entry as served by one MCP server.
+
+    ``resources`` is the complete, digest-bearing manifest of the skill's files, or
+    ``None`` when the server declared ``"resources": "dynamic"``: a generated skill
+    that publishes no stable digests and therefore cannot be verified or installed.
+    ``limit_violation`` records why a well-formed entry exceeds the SEP-2640 per-skill
+    limits; such a skill stays listed so the user can see it, but cannot be installed.
+    """
+
     name: str
     description: str
     uri: str
@@ -93,13 +110,37 @@ class McpRegistrySkill:
     server_version: str | None = None
     frontmatter: dict[str, Any] = field(default_factory=dict)
     resources: tuple["SkillResource", ...] | None = None
+    limit_violation: str | None = None
 
     @property
     def source_url(self) -> str:
         return self.uri
 
     @property
+    def is_dynamic(self) -> bool:
+        return self.resources is None
+
+    @property
+    def total_size(self) -> int | None:
+        if self.resources is None:
+            return None
+        return sum(resource.size for resource in self.resources)
+
+    @property
+    def install_blocker(self) -> str | None:
+        """Why this skill cannot be installed, or ``None`` if it can."""
+        if self.is_dynamic:
+            return (
+                f"MCP skill {self.uri} publishes dynamic content ('resources': 'dynamic'); "
+                "it has no digests to verify against and cannot be installed"
+            )
+        return self.limit_violation
+
+    @property
     def revision(self) -> str | None:
+        # The revision is the content-bound identity SEP-2640 ties approvals to: the
+        # set of (uri, digest) pairs. `size` is deliberately excluded so that a server
+        # adding sizes to an unchanged skill does not present as an update.
         if self.resources is None:
             return None
         payload = sorted(
@@ -111,7 +152,33 @@ class McpRegistrySkill:
 
     @property
     def install_dir_name(self) -> str:
-        return self.name
+        return mcp_skill_install_dir_name(self.server_name, self.name)
+
+
+def mcp_skill_install_dir_name(server_name: str, skill_name: str) -> str:
+    """Directory name under which an MCP-served skill is materialized.
+
+    SEP-2640 makes (server, URI) the identity of a skill and requires every path at
+    which a host materializes skill content to encode the server identity, so that
+    same-named skills from different servers land at distinct paths and the origin
+    is recoverable from the path. The name is ``<server>--<skill>``: the host's own
+    label for the server, lowercased and reduced to ``[a-z0-9-]``, followed by the
+    skill's ``name``. When the server label is not already in that alphabet (or is
+    long) a short hash of the exact label is appended so distinct labels never
+    collapse onto one directory. The skill name itself is left untouched, so the
+    final segment still reads as the Agent Skills ``name``.
+    """
+    _validate_skill_name(skill_name)
+    label = server_name.strip()
+    if not label:
+        raise ValueError("MCP server name is required to name the install directory")
+    folded = _UNSAFE_DIR_CHARS_RE.sub("-", label.casefold()).strip("-")
+    lossless = folded == label and len(folded) <= MAX_INSTALL_DIR_SERVER_SEGMENT
+    if not lossless:
+        suffix = hashlib.sha256(label.encode()).hexdigest()[:8]
+        folded = f"{folded[: MAX_INSTALL_DIR_SERVER_SEGMENT - len(suffix) - 1].strip('-')}-{suffix}"
+        folded = folded.lstrip("-")
+    return f"{folded}{_INSTALL_DIR_SEPARATOR}{skill_name}"
 
 
 @dataclass(frozen=True)
@@ -225,13 +292,20 @@ def _registry_skill(
     uri = entry.uri
     root = _skill_root(uri, name)
     resources_value = entry.resources
-    if resources_value is None:
+    limit_violation: str | None = None
+    if resources_value == DYNAMIC_RESOURCES:
         resources = None
     else:
         if not isinstance(resources_value, (list, tuple)):
-            raise ValueError("skill resources must be a list or null")
+            raise ValueError("skill resources must be a list or the string 'dynamic'")
         resources = tuple(resources_value)
         _validate_resource_set(uri, root, resources)
+        limit_violation = _limit_violation(uri, resources)
+        if limit_violation is not None:
+            logger.warning(
+                "MCP skill exceeds SEP-2640 per-skill limits and cannot be installed",
+                data={"server": server_name, "uri": uri, "reason": limit_violation},
+            )
     return McpRegistrySkill(
         name=name,
         description=description,
@@ -240,7 +314,25 @@ def _registry_skill(
         server_version=server_version,
         frontmatter=frontmatter,
         resources=resources,
+        limit_violation=limit_violation,
     )
+
+
+def _limit_violation(uri: str, resources: tuple["SkillResource", ...]) -> str | None:
+    """The SEP-2640 per-skill limit this entry breaks, judged from the entry alone."""
+    count = len(resources)
+    if count > MAX_SKILL_RESOURCES:
+        return (
+            f"MCP skill {uri} lists {count} resources, more than the "
+            f"{MAX_SKILL_RESOURCES} allowed per skill"
+        )
+    total = sum(resource.size for resource in resources)
+    if total > MAX_SKILL_BYTES:
+        return (
+            f"MCP skill {uri} totals {total:,} bytes, more than the "
+            f"{MAX_SKILL_BYTES:,} bytes ({MAX_SKILL_BYTES // 1_048_576} MiB) allowed per skill"
+        )
+    return None
 
 
 def _required_frontmatter_string(frontmatter: Mapping[str, Any], field: str) -> str:
@@ -282,8 +374,6 @@ def _validate_resource_set(
 ) -> None:
     if not resources:
         raise ValueError("skill resources must be a complete nonempty list")
-    if len(resources) > MAX_SKILL_RESOURCES:
-        raise ValueError("skill resources exceed entry limit")
     seen_uris: set[str] = set()
     seen_paths: dict[str, str] = {}
     top_level = 0
@@ -294,6 +384,9 @@ def _validate_resource_set(
             raise ValueError("skill resources contain duplicate or invalid URIs")
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise ValueError("skill resources require lowercase SHA256 digests")
+        size = resource.size
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError("skill resources require a non-negative integer size")
         seen_uris.add(uri)
         relative = _resource_relative_path(uri, root)
         if relative.casefold() == SKILL_SOURCE_FILENAME.casefold():
@@ -366,14 +459,16 @@ async def install_mcp_registry_skill(
     *,
     destination_root: Path,
 ) -> Path:
-    install_dir = destination_root.resolve() / _safe_install_dir_name(skill.name)
+    blocker = skill.install_blocker
+    if blocker is not None:
+        raise ValueError(blocker)
+    dir_name = skill.install_dir_name
+    install_dir = destination_root.resolve() / dir_name
     if install_dir.exists():
         raise FileExistsError(f"Skill already exists: {install_dir}")
     destination_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        dir=destination_root, prefix=f".{skill.name}.install-"
-    ) as temp:
-        staged_dir = Path(temp) / skill.name
+    with tempfile.TemporaryDirectory(dir=destination_root, prefix=f".{dir_name}.install-") as temp:
+        staged_dir = Path(temp) / dir_name
         fresh = await _refresh_before_fetch(aggregator, skill)
         await _stage_verified_mcp_skill(aggregator, fresh, staged_dir, managed_dir=destination_root)
         staged_dir.rename(install_dir)
@@ -414,8 +509,9 @@ async def _refresh_before_fetch(
         skill.server_name,
         server_version=skill.server_version,
     )
-    if fresh.resources is None:
-        raise ValueError("MCP skill omitted its resource set and cannot be installed")
+    blocker = fresh.install_blocker
+    if blocker is not None:
+        raise ValueError(blocker)
     if fresh.revision != skill.revision or _canonical_frontmatter(
         fresh.frontmatter
     ) != _canonical_frontmatter(skill.frontmatter):
@@ -447,6 +543,13 @@ async def _stage_verified_mcp_skill(
         total += len(content)
         if total > MAX_SKILL_BYTES:
             raise ValueError("MCP skill resource set exceeds total-size limit")
+        # SEP-2640: a read whose byte length differs from the entry's `size` is a
+        # verification failure equivalent to a digest mismatch, hashed or not.
+        if len(content) != resource.size:
+            raise ValueError(
+                f"MCP resource size mismatch: {resource.uri} "
+                f"(expected {resource.size} bytes, read {len(content)})"
+            )
         digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
         if digest != resource.digest:
             raise ValueError(f"MCP resource SHA256 mismatch: {resource.uri}")
@@ -599,6 +702,3 @@ def select_mcp_registry_skill(
     return matches[0] if matches else None
 
 
-def _safe_install_dir_name(name: str) -> str:
-    _validate_skill_name(name)
-    return name

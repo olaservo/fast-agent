@@ -1,4 +1,4 @@
-"""Provisional local wire models for SEP-2640 Draft d7490ecd.
+"""Local wire models for the SEP-2640 (Final) Skills extension.
 
 The pinned MCP SDK does not yet provide Skills Extension request/result types.
 """
@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from mcp_types import (
     CacheableResult,
+    ListResourcesResult,
     PaginatedRequestParams,
     PaginatedResult,
     Request,
@@ -17,24 +18,41 @@ from mcp_types import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
+DYNAMIC_RESOURCES: Literal["dynamic"] = "dynamic"
+"""Marker a server uses in place of a resource manifest for generated skills."""
+
 
 class SkillResource(BaseModel):
-    """A content-addressed resource belonging to a skill."""
+    """A content-addressed resource belonging to a skill.
+
+    ``size`` is the byte length of the raw content the ``digest`` covers. SEP-2640
+    requires it on every entry so hosts can budget a skill before fetching anything.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     uri: str = Field(alias="uri")
     digest: str = Field(alias="digest")
+    size: int = Field(alias="size", ge=0)
 
 
 class SkillEntry(BaseModel):
-    """A skill's metadata and optional complete resource manifest."""
+    """A skill's metadata and its complete resource manifest.
+
+    ``resources`` is required: either the complete list of the skill's files or the
+    literal string ``"dynamic"`` for generated skills that cannot publish stable
+    digests. An entry with ``resources`` missing, or of any other shape, is invalid.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     uri: str = Field(alias="uri")
     frontmatter: dict[str, Any] = Field(alias="frontmatter")
-    resources: list[SkillResource] | None = Field(default=None, alias="resources")
+    resources: list[SkillResource] | Literal["dynamic"] = Field(alias="resources")
+
+    @property
+    def is_dynamic(self) -> bool:
+        return self.resources == DYNAMIC_RESOURCES
 
 
 class ListSkillsRequestParams(PaginatedRequestParams):
@@ -88,3 +106,14 @@ class DirectoryReadRequest(
 
     method: Literal["resources/directory/read"] = "resources/directory/read"
     params: DirectoryReadRequestParams
+
+
+class DirectoryReadResult(ListResourcesResult):
+    """The response to ``resources/directory/read``.
+
+    The direct children of the directory, with subdirectories listed as
+    ``inode/directory`` resources, plus the ``resultType`` discriminator SEP-2640
+    carries on every extension result.
+    """
+
+    result_type: Literal["complete"] = Field(default="complete", alias="resultType")

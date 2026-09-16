@@ -53,6 +53,7 @@ class _Aggregator:
                                 digest=_digest(
                                     "---\nname: hub-search\ndescription: Search\n---\nv2\n"
                                 ),
+                                size=len("---\nname: hub-search\ndescription: Search\n---\nv2\n"),
                             ),
                         ),
                     )
@@ -71,6 +72,7 @@ class _Aggregator:
                     SkillResource(
                         uri=uri,
                         digest=_digest("---\nname: hub-search\ndescription: Search\n---\nv2\n"),
+                        size=len("---\nname: hub-search\ndescription: Search\n---\nv2\n"),
                     )
                 ],
             )

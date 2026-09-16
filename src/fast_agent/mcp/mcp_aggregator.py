@@ -69,7 +69,7 @@ from fast_agent.mcp.helpers.content_helpers import get_text
 from fast_agent.mcp.interfaces import ServerRegistryProtocol
 from fast_agent.mcp.mcp_connection_manager import MCPConnectionManager, ServerConnection
 from fast_agent.mcp.prompt_metadata import with_prompt_metadata
-from fast_agent.mcp.skills_extension import GetSkillResult, ListSkillsResult
+from fast_agent.mcp.skills_extension import DirectoryReadResult, GetSkillResult, ListSkillsResult
 from fast_agent.mcp.tool_execution_handler import NoOpToolExecutionHandler, ToolExecutionHandler
 from fast_agent.mcp.tool_permission_handler import (
     NoOpToolPermissionHandler,
@@ -3788,7 +3788,7 @@ class MCPAggregator(ContextDependent):
         *,
         server_name: str | None = None,
         cursor: str | None = None,
-    ) -> ListResourcesResult:
+    ) -> DirectoryReadResult:
         """List the direct children of a directory resource via SEP-2640.
 
         Routes ``resources/directory/read`` to the named server. Callers should
@@ -3860,7 +3860,7 @@ class MCPAggregator(ContextDependent):
 
     async def _read_directory_from_server(
         self, server_name: str, uri: str, *, cursor: str | None = None
-    ) -> ListResourcesResult:
+    ) -> DirectoryReadResult:
         """Internal helper to call ``resources/directory/read`` on a server."""
         return await self._execute_resource_read(
             server_name,
