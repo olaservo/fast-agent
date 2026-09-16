@@ -5,7 +5,7 @@ The pinned MCP SDK does not yet provide Skills Extension request/result types.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp_types import (
     CacheableResult,
@@ -16,7 +16,7 @@ from mcp_types import (
     RequestParams,
     Result,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 DYNAMIC_RESOURCES: Literal["dynamic"] = "dynamic"
 """Marker a server uses in place of a resource manifest for generated skills."""
@@ -33,7 +33,7 @@ class SkillResource(BaseModel):
 
     uri: str = Field(alias="uri")
     digest: str = Field(alias="digest")
-    size: int = Field(alias="size", ge=0)
+    size: StrictInt = Field(alias="size", ge=0)
 
 
 class SkillEntry(BaseModel):
@@ -69,7 +69,12 @@ class ListSkillsRequest(Request[ListSkillsRequestParams, Literal["skills/list"]]
 class ListSkillsResult(PaginatedResult, CacheableResult):
     """The paginated, cacheable response to ``skills/list``."""
 
-    skills: list[SkillEntry] = Field(alias="skills")
+    skills: list[Annotated[SkillEntry | dict[str, Any], Field(union_mode="left_to_right")]] = Field(
+        alias="skills"
+    )
+    """Entries as served. One that fails ``SkillEntry`` validation is kept as the raw
+    object rather than failing the whole page, so a single invalid entry (which a host
+    MUST NOT load) does not hide every other skill the server publishes."""
     result_type: Literal["complete"] = Field(default="complete", alias="resultType")
 
 

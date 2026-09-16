@@ -46,10 +46,16 @@ install a skill omitted from the listing when you know its URI:
 /skills add skill://acme/example/SKILL.md
 ```
 
-The selected MCP server confirms that URI through `skills/get`. Skills that omit
-`resources` are shown in listings but cannot be installed, because their content
-has no complete digest manifest against which to integrity-check it or compute
-an update revision.
+The selected MCP server confirms that URI through `skills/get`. Every entry must
+carry `resources`: either the complete `{uri, digest, size}` manifest of the
+skill's files or the string `"dynamic"`. Dynamic skills are shown in listings but
+cannot be installed, because their content has no digest manifest against which
+to integrity-check it or compute an update revision. Skills that exceed the
+SEP-2640 per-skill limits (512 resources or 16 MiB in total) are listed with the
+reason but cannot be installed either. An entry that is invalid, for example one
+with no `resources` at all, is skipped with a warning; the rest of the listing is
+still used. Installed MCP skills live at `<server>--<name>` under the managed
+skills directory so that same-named skills from different servers never collide.
 
 ## SDK status
 

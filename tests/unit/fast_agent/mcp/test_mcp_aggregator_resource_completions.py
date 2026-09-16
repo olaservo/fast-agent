@@ -234,6 +234,7 @@ async def test_skills_extension_routes_requests_to_the_named_server() -> None:
     listed = await aggregator.list_skills("demo", cursor="page-1")
     skill = await aggregator.get_skill("skill://demo/SKILL.md", server_name="demo")
 
+    assert isinstance(listed.skills[0], SkillEntry)
     assert listed.skills[0].uri == skill.skill.uri
     assert calls == [
         ("demo", "skills/list", "list_skills", {"cursor": "page-1"}),

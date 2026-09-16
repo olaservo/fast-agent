@@ -174,7 +174,9 @@ async def test_scan_returns_empty_registry_for_repeated_cursor_or_invalid_resour
     malformed = SkillEntry(
         uri=valid.uri,
         frontmatter=valid.frontmatter,
-        resources=[SkillResource(uri="skill://catalog/demo/../escape", digest=_digest("no"), size=2)],
+        resources=[
+            SkillResource(uri="skill://catalog/demo/../escape", digest=_digest("no"), size=2)
+        ],
     )
     for server in (
         _SkillsServer(
@@ -207,8 +209,7 @@ async def test_get_supports_unlisted_uri_and_install_verifies_complete_resource_
     assert (result.skill_dir / "GUIDE.md").read_text() == "guide"
     assert installed is not None
     assert installed.mcp_resources == tuple(
-        McpSkillResource(uri=resource.uri, digest=resource.digest)
-        for resource in _manifest(entry)
+        McpSkillResource(uri=resource.uri, digest=resource.digest) for resource in _manifest(entry)
     )
     assert server.calls[0] == ("get", entry.uri)
     assert server.calls[1] == ("get", entry.uri)  # install refreshes immediately before fetch
@@ -503,7 +504,9 @@ def test_frontmatter_comparison_preserves_json_scalar_types(tmp_path) -> None:
 
 def test_skill_resource_requires_non_negative_size() -> None:
     with pytest.raises(ValidationError):
-        SkillResource.model_validate({"uri": "skill://catalog/demo/SKILL.md", "digest": _digest("")})
+        SkillResource.model_validate(
+            {"uri": "skill://catalog/demo/SKILL.md", "digest": _digest("")}
+        )
     with pytest.raises(ValidationError):
         SkillResource(uri="skill://catalog/demo/SKILL.md", digest=_digest(""), size=-1)
 
@@ -533,7 +536,9 @@ async def test_dynamic_skill_is_listed_but_install_and_update_are_declined(tmp_p
         frontmatter={"name": "demo", "description": "demo description"},
         resources="dynamic",
     )
-    server = _SkillsServer(pages={None: ListSkillsResult(skills=[entry])}, skills={entry.uri: entry})
+    server = _SkillsServer(
+        pages={None: ListSkillsResult(skills=[entry])}, skills={entry.uri: entry}
+    )
 
     registry = await scan_mcp_skill_registry(server, "server")
 
@@ -666,3 +671,125 @@ async def test_same_named_skills_from_two_servers_install_to_distinct_dirs(tmp_p
         assert installed is not None
         assert installed.mcp_server_name == server_name
         assert installed.source_url == entry.uri
+
+
+def test_skill_resource_size_must_be_an_integer_not_a_coercible_value() -> None:
+    for size in ("1", True):
+        with pytest.raises(ValidationError):
+            SkillResource.model_validate(
+                {"uri": "skill://catalog/demo/SKILL.md", "digest": _digest("x"), "size": size}
+            )
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_an_invalid_entry_and_keeps_the_rest() -> None:
+    valid, _ = _entry("demo", "---\nname: demo\ndescription: demo description\n---\n")
+    page = ListSkillsResult.model_validate(
+        {
+            "skills": [
+                # Pre-Final shape: no `size` on the resource entries.
+                {
+                    "uri": "skill://catalog/old/SKILL.md",
+                    "frontmatter": {"name": "old", "description": "old description"},
+                    "resources": [
+                        {"uri": "skill://catalog/old/SKILL.md", "digest": _digest("old")}
+                    ],
+                },
+                # No `resources` at all.
+                {
+                    "uri": "skill://catalog/bare/SKILL.md",
+                    "frontmatter": {"name": "bare", "description": "bare description"},
+                },
+                valid.model_dump(by_alias=True),
+            ]
+        }
+    )
+    assert isinstance(page.skills[0], dict) and isinstance(page.skills[1], dict)
+    assert isinstance(page.skills[2], SkillEntry)
+
+    registry = await scan_mcp_skill_registry(_SkillsServer(pages={None: page}), "server")
+
+    assert registry is not None
+    assert [skill.uri for skill in registry.skills] == [valid.uri]
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_to_shadow_a_legacy_bare_name_install(tmp_path) -> None:
+    body = "---\nname: demo\ndescription: demo description\n---\n"
+    entry, files = _entry("demo", body)
+    server = _SkillsServer(skills={entry.uri: entry}, resources=files)
+    skill = mcp_registry._registry_skill(entry, server_name="server", server_version=None)
+
+    def legacy_install(server_name: str, uri: str) -> None:
+        legacy_dir = tmp_path / "demo"
+        legacy_dir.mkdir()
+        legacy_dir.joinpath("SKILL.md").write_text(body)
+        write_installed_skill_source(
+            legacy_dir,
+            build_mcp_installed_skill_source(
+                server_name=server_name,
+                server_version=None,
+                skill_uri=uri,
+                fingerprint=compute_skill_content_fingerprint(legacy_dir),
+                resources=(McpSkillResource(uri=uri, digest=_digest(body)),),
+                revision=_digest(body),
+            ),
+        )
+
+    # Same (server, URI) under the pre-Final layout: still this skill, so refuse.
+    legacy_install("server", entry.uri)
+    with pytest.raises(FileExistsError, match="pre-SEP-2640-Final layout"):
+        await install_mcp_registry_skill(server, skill, destination_root=tmp_path)
+    assert not (tmp_path / "server--demo").exists()
+    assert server.calls == []
+
+    # A bare-name directory for a different origin is unrelated and does not block.
+    import shutil
+
+    shutil.rmtree(tmp_path / "demo")
+    legacy_install("other-server", entry.uri)
+    installed_dir = await install_mcp_registry_skill(server, skill, destination_root=tmp_path)
+    assert installed_dir == (tmp_path / "server--demo").resolve()
+
+
+@pytest.mark.asyncio
+async def test_update_reports_a_now_unverifiable_skill_as_integrity_error(tmp_path) -> None:
+    body = "---\nname: demo\ndescription: demo description\n---\n"
+    entry, _ = _entry("demo", body)
+    skill_dir = tmp_path / "server--demo"
+    skill_dir.mkdir()
+    skill_dir.joinpath("SKILL.md").write_text(body)
+    write_installed_skill_source(
+        skill_dir,
+        build_mcp_installed_skill_source(
+            server_name="server",
+            server_version=None,
+            skill_uri=entry.uri,
+            fingerprint=compute_skill_content_fingerprint(skill_dir),
+            resources=(McpSkillResource(uri=entry.uri, digest=_digest(body)),),
+            revision=_digest(body),
+        ),
+    )
+    installed = read_installed_skill_source(skill_dir).source
+    assert installed is not None
+    now_dynamic = SkillEntry(
+        uri=entry.uri, frontmatter=entry.frontmatter, resources=DYNAMIC_RESOURCES
+    )
+    server = _SkillsServer(skills={entry.uri: now_dynamic})
+    source = McpSkillSource(
+        aggregator=server,
+        registry=McpSkillRegistry(server_name="server", server_version=None, skills=[]),
+    )
+    update = SkillUpdateInfo(
+        index=1, name="demo", skill_dir=skill_dir, status="up_to_date", managed_source=installed
+    )
+
+    checked = await source.check_updates([update])
+    applied = await source.apply_updates([update], force=False)
+
+    for result in (checked[0], applied[0]):
+        assert result.status == "integrity_error"
+        assert result.detail is not None and "dynamic" in result.detail
+        assert result.current_revision == _digest(body)
+    assert skill_dir.joinpath("SKILL.md").read_text() == body
+    assert ("resource", entry.uri) not in server.calls

@@ -85,6 +85,9 @@ class McpSkillSource:
             if skill is None:
                 checked.append(_missing_registry_entry_update(update))
                 continue
+            if skill.install_blocker is not None:
+                checked.append(_blocked_update(update, skill))
+                continue
             available = skill.revision
             status = "up_to_date" if available == source.installed_revision else "update_available"
             checked.append(
@@ -127,6 +130,9 @@ class McpSkillSource:
                 continue
             if skill is None:
                 results.append(_missing_registry_entry_update(update))
+                continue
+            if skill.install_blocker is not None:
+                results.append(_blocked_update(update, skill))
                 continue
             if skill.revision == source.installed_revision:
                 results.append(
@@ -281,6 +287,21 @@ def _missing_registry_entry_update(update: SkillUpdateInfo) -> SkillUpdateInfo:
         detail="MCP registry entry not found",
         current_revision=source.installed_revision if source else update.current_revision,
         available_revision=source.installed_revision if source else update.available_revision,
+        managed_source=source,
+    )
+
+
+def _blocked_update(update: SkillUpdateInfo, skill: McpRegistrySkill) -> SkillUpdateInfo:
+    """The server still serves the skill, but in a form the host cannot verify or accept."""
+    source = update.managed_source
+    return SkillUpdateInfo(
+        index=update.index,
+        name=update.name,
+        skill_dir=update.skill_dir,
+        status="integrity_error",
+        detail=skill.install_blocker,
+        current_revision=source.installed_revision if source else update.current_revision,
+        available_revision=skill.revision,
         managed_source=source,
     )
 

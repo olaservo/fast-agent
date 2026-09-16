@@ -23,7 +23,7 @@ from fast_agent.config import MCPServerSettings
 from fast_agent.core.exceptions import ServerSessionTerminatedError
 from fast_agent.mcp.client_callback_runtime import MCPClientCallbackRuntime
 from fast_agent.mcp.client_connection import MCPClientConnection
-from fast_agent.mcp.skills_extension import GetSkillResult, ListSkillsResult
+from fast_agent.mcp.skills_extension import GetSkillResult, ListSkillsResult, SkillEntry
 from fast_agent.mcp.tool_result_metadata import url_elicitation_required_payload
 from fast_agent.mcp.uri_security import is_file_uri
 
@@ -581,8 +581,9 @@ async def test_skills_extension_requests_and_parses_results() -> None:
     assert listed.next_cursor == "page-2"
     assert listed.ttl_ms == 30_000
     assert listed.cache_scope == "public"
-    assert listed.skills[0].resources is not None
-    listed_resources = listed.skills[0].resources
+    listed_entry = listed.skills[0]
+    assert isinstance(listed_entry, SkillEntry)
+    listed_resources = listed_entry.resources
     assert isinstance(listed_resources, list)
     assert listed_resources[0].digest == "sha256:abc"
     assert listed_resources[0].size == 12

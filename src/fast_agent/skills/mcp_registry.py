@@ -228,10 +228,25 @@ async def scan_mcp_skill_registry(
 
     try:
         entries = await _list_skill_entries(aggregator, server_name)
-        skills = [
-            _registry_skill(entry, server_name=server_name, server_version=server_version)
-            for entry in entries
-        ]
+        skills: list[McpRegistrySkill] = []
+        for entry in entries:
+            # SEP-2640: an invalid entry MUST NOT be loaded, but it says nothing about the
+            # other entries in the listing, so skip it rather than empty the registry.
+            if isinstance(entry, dict):
+                logger.warning(
+                    "Skipping invalid MCP skill entry",
+                    data={"server": server_name, "uri": entry.get("uri")},
+                )
+                continue
+            try:
+                skills.append(
+                    _registry_skill(entry, server_name=server_name, server_version=server_version)
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Skipping invalid MCP skill entry",
+                    data={"server": server_name, "uri": entry.uri, "error": str(exc)},
+                )
         _reject_duplicate_uris(skills)
     except Exception as exc:
         logger.warning(
@@ -258,8 +273,8 @@ async def get_mcp_registry_skill(
 
 async def _list_skill_entries(
     aggregator: McpSkillRegistryClient, server_name: str
-) -> list["SkillEntry"]:
-    entries: list[SkillEntry] = []
+) -> list["SkillEntry | dict[str, Any]"]:
+    entries: list[SkillEntry | dict[str, Any]] = []
     seen_cursors: set[str] = set()
     cursor: str | None = None
     for _ in range(MAX_LIST_PAGES):
@@ -299,9 +314,12 @@ def _registry_skill(
         if not isinstance(resources_value, (list, tuple)):
             raise ValueError("skill resources must be a list or the string 'dynamic'")
         resources = tuple(resources_value)
-        _validate_resource_set(uri, root, resources)
+        # The limits are judged from the entry alone and short-circuit the per-resource
+        # walk; such a skill is listed with its reason but never installed.
         limit_violation = _limit_violation(uri, resources)
-        if limit_violation is not None:
+        if limit_violation is None:
+            _validate_resource_set(uri, root, resources)
+        else:
             logger.warning(
                 "MCP skill exceeds SEP-2640 per-skill limits and cannot be installed",
                 data={"server": server_name, "uri": uri, "reason": limit_violation},
@@ -384,9 +402,6 @@ def _validate_resource_set(
             raise ValueError("skill resources contain duplicate or invalid URIs")
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise ValueError("skill resources require lowercase SHA256 digests")
-        size = resource.size
-        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-            raise ValueError("skill resources require a non-negative integer size")
         seen_uris.add(uri)
         relative = _resource_relative_path(uri, root)
         if relative.casefold() == SKILL_SOURCE_FILENAME.casefold():
@@ -462,13 +477,18 @@ async def install_mcp_registry_skill(
     blocker = skill.install_blocker
     if blocker is not None:
         raise ValueError(blocker)
-    dir_name = skill.install_dir_name
-    install_dir = destination_root.resolve() / dir_name
+    install_dir = destination_root.resolve() / skill.install_dir_name
     if install_dir.exists():
         raise FileExistsError(f"Skill already exists: {install_dir}")
+    legacy_dir = _legacy_install_dir(skill, destination_root.resolve())
+    if legacy_dir is not None:
+        raise FileExistsError(
+            f"Skill already installed at {legacy_dir} under the pre-SEP-2640-Final layout; "
+            "update or remove it instead of installing again"
+        )
     destination_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=destination_root, prefix=f".{dir_name}.install-") as temp:
-        staged_dir = Path(temp) / dir_name
+    with tempfile.TemporaryDirectory(dir=destination_root, prefix=".install-") as temp:
+        staged_dir = Path(temp) / "skill"
         fresh = await _refresh_before_fetch(aggregator, skill)
         await _stage_verified_mcp_skill(aggregator, fresh, staged_dir, managed_dir=destination_root)
         staged_dir.rename(install_dir)
@@ -482,10 +502,8 @@ async def update_mcp_registry_skill(
     skill_dir: Path,
 ) -> Path:
     skill_dir = skill_dir.resolve()
-    with tempfile.TemporaryDirectory(
-        dir=skill_dir.parent, prefix=f".{skill_dir.name}.update-"
-    ) as temp:
-        staged_dir = Path(temp) / skill_dir.name
+    with tempfile.TemporaryDirectory(dir=skill_dir.parent, prefix=".update-") as temp:
+        staged_dir = Path(temp) / "skill"
         fresh = await _refresh_before_fetch(aggregator, skill)
         await _stage_verified_mcp_skill(
             aggregator,
@@ -519,6 +537,28 @@ async def _refresh_before_fetch(
     return fresh
 
 
+def _legacy_install_dir(skill: McpRegistrySkill, destination_root: Path) -> Path | None:
+    """The bare-name directory an earlier fast-agent installed this same skill into.
+
+    Releases before the SEP-2640 Final alignment materialized MCP skills at
+    ``<name>``; the install path now encodes the server as well. An existing install
+    of the same (server, URI) is still that skill, so it must be updated in place or
+    removed, not shadowed by a second copy under the new name.
+    """
+    legacy_dir = destination_root / skill.name
+    if legacy_dir == destination_root / skill.install_dir_name or not legacy_dir.is_dir():
+        return None
+    installed = read_installed_skill_source(legacy_dir).source
+    if (
+        installed is None
+        or installed.source_origin != "mcp"
+        or installed.mcp_server_name != skill.server_name
+        or installed.source_url != skill.uri
+    ):
+        return None
+    return legacy_dir
+
+
 async def _stage_verified_mcp_skill(
     aggregator: McpSkillInstallClient,
     skill: McpRegistrySkill,
@@ -538,18 +578,18 @@ async def _stage_verified_mcp_skill(
             cache_mode="refresh",
         )
         content = _resource_bytes(result, resource.uri)
-        if len(content) > MAX_RESOURCE_BYTES:
-            raise ValueError(f"MCP resource exceeds per-file limit: {resource.uri}")
-        total += len(content)
-        if total > MAX_SKILL_BYTES:
-            raise ValueError("MCP skill resource set exceeds total-size limit")
         # SEP-2640: a read whose byte length differs from the entry's `size` is a
-        # verification failure equivalent to a digest mismatch, hashed or not.
+        # verification failure equivalent to a digest mismatch, hashed or not. The
+        # entry's sizes already passed the per-skill limits, so this also bounds the
+        # bytes retained here.
         if len(content) != resource.size:
             raise ValueError(
                 f"MCP resource size mismatch: {resource.uri} "
                 f"(expected {resource.size} bytes, read {len(content)})"
             )
+        total += len(content)
+        if total > MAX_SKILL_BYTES:
+            raise ValueError("MCP skill resource set exceeds total-size limit")
         digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
         if digest != resource.digest:
             raise ValueError(f"MCP resource SHA256 mismatch: {resource.uri}")
@@ -700,5 +740,3 @@ def select_mcp_registry_skill(
     if len(matches) > 1:
         raise LookupError(f"Skill name is ambiguous: {value}")
     return matches[0] if matches else None
-
-
