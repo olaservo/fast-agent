@@ -793,3 +793,44 @@ async def test_update_reports_a_now_unverifiable_skill_as_integrity_error(tmp_pa
         assert result.current_revision == _digest(body)
     assert skill_dir.joinpath("SKILL.md").read_text() == body
     assert ("resource", entry.uri) not in server.calls
+
+
+@pytest.mark.asyncio
+async def test_scan_keeps_first_entry_when_a_uri_repeats() -> None:
+    first, _ = _entry("same", "---\nname: same\ndescription: first\n---\nfirst\n")
+    second, _ = _entry(
+        "same",
+        "---\nname: same\ndescription: second\n---\nsecond\n",
+        frontmatter={"name": "same", "description": "second"},
+    )
+    other, _ = _entry("other", "---\nname: other\ndescription: other\n---\nbody\n")
+    server = _SkillsServer(pages={None: ListSkillsResult(skills=[first, second, other])})
+
+    registry = await scan_mcp_skill_registry(server, "hf")
+
+    assert registry is not None
+    assert [(skill.uri, skill.description) for skill in registry.skills] == [
+        ("skill://catalog/same/SKILL.md", "same description"),
+        ("skill://catalog/other/SKILL.md", "other description"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scan_truncates_a_listing_past_the_entry_limit(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_registry, "MAX_LIST_ENTRIES", 2)
+    entries = [
+        _entry(f"skill-{index}", f"---\nname: skill-{index}\ndescription: d\n---\nbody\n")[0]
+        for index in range(3)
+    ]
+    server = _SkillsServer(
+        pages={
+            None: ListSkillsResult(skills=entries[:2], next_cursor="next"),
+            "next": ListSkillsResult(skills=entries[2:]),
+        }
+    )
+
+    registry = await scan_mcp_skill_registry(server, "hf")
+
+    assert registry is not None
+    assert [skill.name for skill in registry.skills] == ["skill-0", "skill-1"]
+    assert server.calls == [("list", None)]

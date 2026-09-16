@@ -241,11 +241,13 @@ def _format_marketplace_skills(
         bundle_name = None
         bundle_description = None
         revision = None
+        install_blocker = None
         if isinstance(entry, MarketplaceSkill):
             bundle_name = entry.bundle_name
             bundle_description = entry.bundle_description
         if isinstance(entry, McpRegistrySkill):
-            revision = entry.revision
+            install_blocker = entry.install_blocker
+            revision = None if install_blocker else entry.revision
 
         if bundle_name and bundle_name != current_bundle:
             current_bundle = bundle_name
@@ -268,6 +270,12 @@ def _format_marketplace_skills(
                 "integrity: SHA-256 manifest; checked on install",
                 style="dim green",
             )
+            content.append("\n")
+        if install_blocker:
+            # SEP-2640: a host that declines a skill on limits or dynamic content
+            # should say why up front, not fail on a later read.
+            content.append("     ", style="dim")
+            content.append(f"not installable: {install_blocker}", style="dim yellow")
             content.append("\n")
         content.append("\n")
 

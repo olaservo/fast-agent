@@ -453,3 +453,44 @@ async def test_skills_update_reports_mcp_digest_update_available(tmp_path) -> No
     rendered = "\n".join(_plain(message.text) for message in outcome.messages)
     assert "hub-search" in rendered
     assert "update available" in rendered
+
+
+class _BlockedAggregator(_Aggregator):
+    async def list_mcp_skill_registries(self) -> list[McpSkillRegistry]:
+        return [
+            McpSkillRegistry(
+                server_name="hf",
+                server_version="1.2.3",
+                skills=[
+                    McpRegistrySkill(
+                        name="daily-report",
+                        description="Generated on demand",
+                        uri="skill://daily-report/SKILL.md",
+                        server_name="hf",
+                        server_version="1.2.3",
+                        frontmatter={"name": "daily-report", "description": "Generated"},
+                        resources=None,
+                    )
+                ],
+            )
+        ]
+
+
+class _BlockedAgent:
+    aggregator = _BlockedAggregator()
+
+
+@pytest.mark.asyncio
+async def test_skills_available_says_why_a_skill_cannot_be_installed() -> None:
+    settings = Settings()
+    ctx = _ctx(settings, agent_provider=StaticAgentProvider({"main": _BlockedAgent()}))
+
+    outcome = await handle_list_marketplace_skills(
+        ctx, agent_name="main", query=None, marketplace_url_override="hf"
+    )
+
+    rendered = "\n".join(_plain(message.text) for message in outcome.messages)
+    assert "daily-report" in rendered
+    assert "not installable:" in rendered
+    assert "'resources': 'dynamic'" in rendered
+    assert "integrity: SHA-256 manifest" not in rendered

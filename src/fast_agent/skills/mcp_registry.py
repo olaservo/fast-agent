@@ -74,9 +74,11 @@ MAX_LIST_ENTRIES = 10_000
 # alone (count the resources, sum their sizes) before any file is fetched.
 MAX_SKILL_RESOURCES = 512
 MAX_SKILL_BYTES = 16 * 1_048_576
-# A single file can legitimately be the whole 16 MiB budget.
+# A single file can legitimately be the whole 16 MiB budget, SKILL.md included.
 MAX_RESOURCE_BYTES = MAX_SKILL_BYTES
-MAX_SKILL_MD_BYTES = 262_144
+MAX_SKILL_MD_BYTES = MAX_SKILL_BYTES
+# Host policy, not a SEP-2640 limit: the disk a single server may fill with
+# installed skills. The SEP bounds one skill, not how many a server serves.
 MAX_SERVER_SKILL_BYTES = 200 * 1_048_576
 MAX_RESOURCE_PATH_LENGTH = 1_024
 MAX_INSTALL_DIR_SERVER_SEGMENT = 48
@@ -247,7 +249,7 @@ async def scan_mcp_skill_registry(
                     "Skipping invalid MCP skill entry",
                     data={"server": server_name, "uri": entry.uri, "error": str(exc)},
                 )
-        _reject_duplicate_uris(skills)
+        skills = _drop_duplicate_uris(skills, server_name)
     except Exception as exc:
         logger.warning(
             "MCP skills/list failed validation", data={"server": server_name, "error": str(exc)}
@@ -283,15 +285,27 @@ async def _list_skill_entries(
         if not isinstance(page, list):
             raise ValueError("skills/list returned a non-list skills field")
         entries.extend(page)
-        if len(entries) > MAX_LIST_ENTRIES:
-            raise ValueError("skills/list exceeds entry limit")
+        # SEP-2640 says a listing may be arbitrarily large. The host caps what it
+        # keeps in memory, but a catalog past the cap is truncated with a warning,
+        # not discarded: what was read is still a valid partial listing.
+        if len(entries) >= MAX_LIST_ENTRIES:
+            del entries[MAX_LIST_ENTRIES:]
+            logger.warning(
+                "skills/list truncated at the host entry limit",
+                data={"server": server_name, "limit": MAX_LIST_ENTRIES},
+            )
+            return entries
         cursor = result.next_cursor
         if cursor is None:
             return entries
         if not isinstance(cursor, str) or cursor in seen_cursors:
             raise ValueError("skills/list returned an invalid or repeated cursor")
         seen_cursors.add(cursor)
-    raise ValueError("skills/list exceeds page limit")
+    logger.warning(
+        "skills/list truncated at the host page limit",
+        data={"server": server_name, "limit": MAX_LIST_PAGES},
+    )
+    return entries
 
 
 def _registry_skill(
@@ -460,12 +474,23 @@ def _validate_skill_name(name: str) -> None:
         raise ValueError("skill name is reserved by the local filesystem")
 
 
-def _reject_duplicate_uris(skills: Iterable[McpRegistrySkill]) -> None:
+def _drop_duplicate_uris(
+    skills: Iterable[McpRegistrySkill], server_name: str
+) -> list[McpRegistrySkill]:
+    """Keep the first entry per URI. A repeated URI is a server bug, not a reason
+    to discard every other skill it publishes."""
     seen: set[str] = set()
+    kept: list[McpRegistrySkill] = []
     for skill in skills:
         if skill.uri in seen:
-            raise ValueError("skills/list contains duplicate skill URIs")
+            logger.warning(
+                "Skipping repeated MCP skill URI in skills/list",
+                data={"server": server_name, "uri": skill.uri},
+            )
+            continue
         seen.add(skill.uri)
+        kept.append(skill)
+    return kept
 
 
 async def install_mcp_registry_skill(

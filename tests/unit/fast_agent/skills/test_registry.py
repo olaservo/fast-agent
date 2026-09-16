@@ -272,3 +272,90 @@ def test_cli_override_propagates_to_global_settings(tmp_path: Path, monkeypatch)
     directory_strs = [str(d) for d in directories]
 
     assert str(custom_skills) in directory_strs, f"Expected {custom_skills} in {directory_strs}"
+
+
+def _install_mcp_skill(root: Path, server: str, name: str, body: str = "Body") -> Path:
+    from fast_agent.skills.provenance import (
+        build_mcp_installed_skill_source,
+        compute_skill_content_fingerprint,
+        write_installed_skill_source,
+    )
+
+    skill_dir = root / f"{server}--{name}"
+    write_skill(root, f"{server}--{name}", body=body)
+    manifest = skill_dir / "SKILL.md"
+    manifest.write_text(f"---\nname: {name}\ndescription: desc\n---\n{body}\n", encoding="utf-8")
+    write_installed_skill_source(
+        skill_dir,
+        build_mcp_installed_skill_source(
+            server_name=server,
+            server_version=None,
+            skill_uri=f"skill://{name}/SKILL.md",
+            fingerprint=compute_skill_content_fingerprint(skill_dir),
+            resources=(),
+            revision="sha256:" + "0" * 64,
+        ),
+    )
+    return skill_dir
+
+
+def test_load_manifests_keeps_same_name_across_origins(tmp_path: Path) -> None:
+    local_dir = tmp_path / "local"
+    managed_dir = tmp_path / "managed"
+    write_skill(local_dir, "alpha", body="Local body")
+    _install_mcp_skill(managed_dir, "docs", "alpha", body="Server body")
+
+    registry = SkillRegistry(base_dir=tmp_path, directories=[local_dir, managed_dir])
+    manifests = registry.load_manifests()
+
+    assert sorted((m.name, m.mcp_server or "") for m in manifests) == [
+        ("alpha", ""),
+        ("alpha", "docs"),
+    ]
+    assert len(registry.warnings) == 1
+    assert "used by both the local filesystem" in registry.warnings[0]
+    assert "MCP server 'docs'" in registry.warnings[0]
+
+
+def test_load_manifests_keeps_same_name_from_two_servers(tmp_path: Path) -> None:
+    managed_dir = tmp_path / "managed"
+    _install_mcp_skill(managed_dir, "docs", "alpha")
+    _install_mcp_skill(managed_dir, "other", "alpha")
+
+    manifests = SkillRegistry(base_dir=tmp_path, directories=[managed_dir]).load_manifests()
+
+    assert sorted(m.mcp_server for m in manifests) == ["docs", "other"]
+
+
+def test_load_manifests_drops_mcp_skill_modified_after_install(tmp_path: Path) -> None:
+    managed_dir = tmp_path / "managed"
+    skill_dir = _install_mcp_skill(managed_dir, "docs", "alpha")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: desc\n---\nedited by a tool\n", encoding="utf-8"
+    )
+
+    registry = SkillRegistry(base_dir=tmp_path, directories=[managed_dir])
+    manifests, errors = registry.load_manifests_with_errors()
+
+    assert manifests == []
+    assert len(errors) == 1
+    assert "modified after install" in errors[0]["error"]
+    assert "'docs'" in errors[0]["error"]
+
+
+def test_format_skills_for_prompt_tags_mcp_origin(tmp_path: Path) -> None:
+    local = SkillManifest(
+        name="alpha", description="d", body="", path=tmp_path / "alpha" / "SKILL.md"
+    )
+    served = SkillManifest(
+        name="alpha",
+        description="d",
+        body="",
+        path=tmp_path / "docs--alpha" / "SKILL.md",
+        mcp_server="docs",
+    )
+
+    root = ElementTree.fromstring(format_skills_for_prompt([local, served], include_preamble=False))
+    origins = [skill.findtext("origin") for skill in root.findall("skill")]
+    assert origins == [None, "mcp-server:docs"]
+    assert "installed from that MCP server" in format_skills_for_prompt([local, served])

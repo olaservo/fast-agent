@@ -60,10 +60,34 @@ skills directory so that same-named skills from different servers never collide.
 ## SDK status
 
 The pinned MCP Python SDK does not yet provide typed SEP-2640 request and result
-models. `fast-agent` therefore uses local, provisional wire models for
-`skills/list`, `skills/get`, and the draft's optional
-`resources/directory/read` method. Those internal models may change when the SDK
-adds support or the draft changes.
+models. `fast-agent` therefore uses local wire models for `skills/list`,
+`skills/get`, and the optional `resources/directory/read` method, matching
+SEP-2640 Final. Those internal models may change when the SDK adds support.
+
+## How the host applies SEP-2640
+
+`fast-agent` installs an MCP skill as a managed local copy rather than loading it
+on demand, and the following follow from that choice:
+
+- Every file is fetched, size- and digest-checked, and written to disk at install
+  time, after a fresh `skills/get` confirms the entry has not changed. The SEP's
+  lazy-retrieval rule is not followed; the install is the user's explicit request
+  for the whole skill.
+- Installed skills live at `<server>--<name>` under the managed skills directory
+  with a provenance sidecar naming the server and the verified content
+  fingerprint. The fingerprint is recomputed every time skills are loaded, and a
+  skill whose files changed after install is dropped with an error until it is
+  updated or removed.
+- A skill installed from an MCP server carries an `<origin>` element in the
+  model's skill listing, and a same-named skill from another origin (the local
+  filesystem or another server) is listed alongside it rather than replaced.
+- `allowed-tools` and `hooks` are removed from an installed MCP skill's
+  frontmatter. There is no per-skill approval gate on code-execution tool calls
+  while the model is acting on an MCP skill; the SEP's "acting window" is not
+  modelled.
+- A server's installed skills may total at most 200 MiB on disk. This is host
+  policy, not a SEP limit. A `skills/list` longer than 10,000 entries or 1,000
+  pages is truncated with a warning.
 
 ## Trying it
 
