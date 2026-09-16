@@ -112,8 +112,7 @@ class DirectoryReadResult(ListResourcesResult):
     """The response to ``resources/directory/read``.
 
     The direct children of the directory, with subdirectories listed as
-    ``inode/directory`` resources, plus the ``resultType`` discriminator SEP-2640
-    carries on every extension result.
+    ``inode/directory`` resources. The shape is ``resources/list``'s, including
+    the base protocol's ``resultType``, which the SDK's ``ListResourcesResult``
+    already declares.
     """
-
-    result_type: Literal["complete"] = Field(default="complete", alias="resultType")
