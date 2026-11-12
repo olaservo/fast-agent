@@ -538,6 +538,10 @@ class McpAgent(ABC, ToolAgent):
             access_modes=("[red]direct[/red]",),
         )
 
+    def take_event_messages(self) -> list[str]:
+        """Drain MCP events delivered since the last model call."""
+        return self._aggregator.take_event_messages()
+
     async def get_server_status(self) -> dict[str, ServerStatus]:
         """Expose server status details for UI and diagnostics consumers."""
         if not self._aggregator:
