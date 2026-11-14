@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mcp.shared.exceptions import MCPError
@@ -31,7 +31,6 @@ from fast_agent.mcp.events_extension import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -66,41 +65,6 @@ class EventPoller(Protocol):
     ) -> PollEventsResult: ...
 
 
-class EventSubscriptionStore(Protocol):
-    def load(self) -> list[dict[str, Any]]: ...
-
-    def save(self, records: list[dict[str, Any]]) -> None: ...
-
-
-class JsonEventSubscriptionStore:
-    """Persist subscriptions and their cursors as one JSON file."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    def load(self) -> list[dict[str, Any]]:
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return []
-        except (OSError, ValueError):
-            logger.warning(f"Ignoring unreadable event subscription store at {self.path}")
-            return []
-        records = payload.get("subscriptions") if isinstance(payload, dict) else None
-        if not isinstance(records, list):
-            return []
-        return [record for record in records if isinstance(record, dict)]
-
-    def save(self, records: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f"{self.path.name}.tmp")
-        temporary.write_text(
-            json.dumps({"subscriptions": records}, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.path)
-
-
 def subscription_key(server_name: str, name: str, arguments: dict[str, Any]) -> str:
     """A stable handle for one ``(server, event name, arguments)`` subscription."""
     canonical = json.dumps([server_name, name, arguments], sort_keys=True, separators=(",", ":"))
@@ -113,7 +77,7 @@ class EventSubscription:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
     cursor: str | None = None
-    """The last cursor whose events the agent has consumed."""
+    """The cursor the next poll resumes from."""
     status: Literal["active", "terminated"] = "active"
     last_error: str | None = None
     delivered: int = 0
@@ -123,15 +87,6 @@ class EventSubscription:
     @property
     def key(self) -> str:
         return subscription_key(self.server_name, self.name, self.arguments)
-
-    def to_record(self) -> dict[str, Any]:
-        return {
-            "server_name": self.server_name,
-            "name": self.name,
-            "arguments": self.arguments,
-            "cursor": self.cursor,
-            "wake": self.wake,
-        }
 
 
 @dataclass(frozen=True)
@@ -148,24 +103,25 @@ def format_event_messages(items: list[EventInboxItem]) -> str:
     """Render inbox items as one user message for the model."""
     blocks: list[str] = [EVENT_MESSAGE_PREAMBLE]
     for item in items:
-        attributes = f'server="{item.server_name}" name="{item.name}"'
+        attributes = f'server="{escape(item.server_name)}" name="{escape(item.name)}"'
         if item.kind == "event" and item.occurrence is not None:
             occurrence = item.occurrence
-            body = json.dumps(occurrence.data, indent=2, sort_keys=True)
+            # Server text must not be able to close the wrapper or add attributes.
+            body = json.dumps(occurrence.data, indent=2, sort_keys=True).replace("</", "<\\/")
             blocks.append(
-                f'<mcp-event {attributes} id="{occurrence.event_id}" '
-                f'timestamp="{occurrence.timestamp}">\n{body}\n</mcp-event>'
+                f'<mcp-event {attributes} id="{escape(occurrence.event_id)}" '
+                f'timestamp="{escape(occurrence.timestamp)}">\n{body}\n</mcp-event>'
             )
         elif item.kind == "gap":
             blocks.append(
                 f"<mcp-event-gap {attributes}>\n"
-                f"{item.detail or 'Some events may have been skipped.'}\n"
+                f"{escape(item.detail or 'Some events may have been skipped.')}\n"
                 "</mcp-event-gap>"
             )
         else:
             blocks.append(
                 f"<mcp-event-terminated {attributes}>\n"
-                f"{item.detail or 'The subscription has ended.'}\n"
+                f"{escape(item.detail or 'The subscription has ended.')}\n"
                 "</mcp-event-terminated>"
             )
     return "\n\n".join(blocks)
@@ -174,7 +130,6 @@ def format_event_messages(items: list[EventInboxItem]) -> str:
 @dataclass
 class _Running:
     subscription: EventSubscription
-    polled_cursor: str | None
     seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
     task: asyncio.Task[None] | None = None
 
@@ -195,13 +150,11 @@ class EventSubscriptionManager:
         self,
         poller: EventPoller,
         *,
-        store: EventSubscriptionStore | None = None,
         min_poll_ms: int = MIN_POLL_INTERVAL_MS,
         default_poll_ms: int = DEFAULT_POLL_INTERVAL_MS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._poller = poller
-        self._store = store
         self._min_poll_ms = min_poll_ms
         self._default_poll_ms = default_poll_ms
         self._sleep = sleep
@@ -262,9 +215,7 @@ class EventSubscriptionManager:
         key = subscription.key
         existing = self._running.get(key)
         if existing is not None:
-            if existing.subscription.wake != wake:
-                existing.subscription.wake = wake
-                self._save()
+            existing.subscription.wake = wake
             return existing.subscription
 
         descriptor = await self._find_event_type(server_name, name)
@@ -279,11 +230,10 @@ class EventSubscriptionManager:
 
         result = await self._poller.poll_events(server_name, name, subscription.arguments)
         self._terminated.pop(key, None)
-        state = _Running(subscription, polled_cursor=None)
+        state = _Running(subscription)
         self._running[key] = state
         self._accept(state, result)
         self._start(state, self._next_delay_ms(result))
-        self._save()
         return subscription
 
     async def unsubscribe(self, key: str) -> bool:
@@ -294,7 +244,6 @@ class EventSubscriptionManager:
         if state is None:
             return False
         await self._cancel(state)
-        self._save()
         return True
 
     def poll_now(self, key: str) -> bool:
@@ -311,44 +260,10 @@ class EventSubscriptionManager:
         self._start(state, 0)
         return True
 
-    def restore(self) -> list[EventSubscription]:
-        """Resume the subscriptions recorded in the store from their saved cursors."""
-        if self._store is None:
-            return []
-        restored: list[EventSubscription] = []
-        for record in self._store.load():
-            server_name = record.get("server_name")
-            name = record.get("name")
-            arguments = record.get("arguments")
-            cursor = record.get("cursor")
-            if not isinstance(server_name, str) or not isinstance(name, str):
-                continue
-            subscription = EventSubscription(
-                server_name,
-                name,
-                arguments if isinstance(arguments, dict) else {},
-                cursor if isinstance(cursor, str) else None,
-                wake=record.get("wake") is True,
-            )
-            if subscription.key in self._running:
-                continue
-            state = _Running(subscription, polled_cursor=subscription.cursor)
-            self._running[subscription.key] = state
-            self._start(state, 0)
-            restored.append(subscription)
-        return restored
-
     def take(self) -> list[EventInboxItem]:
-        """Hand over everything in the inbox and record the cursors as consumed."""
+        """Hand over everything in the inbox."""
         items, self._inbox = self._inbox, []
         self._wake.clear()
-        changed = False
-        for state in self._running.values():
-            if state.subscription.cursor != state.polled_cursor:
-                state.subscription.cursor = state.polled_cursor
-                changed = True
-        if changed:
-            self._save()
         return items
 
     async def aclose(self) -> None:
@@ -390,7 +305,7 @@ class EventSubscriptionManager:
                     subscription.server_name,
                     subscription.name,
                     subscription.arguments,
-                    cursor=state.polled_cursor,
+                    cursor=subscription.cursor,
                 )
             except MCPError as exc:
                 if exc.code in (EVENTS_NOT_FOUND, EVENTS_UNSUPPORTED) and not rediscovered:
@@ -437,7 +352,7 @@ class EventSubscriptionManager:
             return False
         if descriptor is None or not descriptor.supports("poll"):
             return False
-        state.polled_cursor = None
+        subscription.cursor = None
         self._deliver(
             state,
             "gap",
@@ -453,7 +368,6 @@ class EventSubscriptionManager:
         self._terminated[subscription.key] = subscription
         state.task = None
         self._deliver(state, "terminated", detail=f"The subscription has ended: {reason}")
-        self._save()
 
     def _accept(self, state: _Running, result: PollEventsResult) -> None:
         if result.truncated and result.cursor is not None:
@@ -466,12 +380,7 @@ class EventSubscriptionManager:
             if state.remember(occurrence.event_id):
                 self._deliver(state, "event", occurrence=occurrence)
                 state.subscription.delivered += 1
-        state.polled_cursor = result.cursor
-        key = state.subscription.key
-        if not any(item.subscription_key == key for item in self._inbox):
-            if state.subscription.cursor != state.polled_cursor:
-                state.subscription.cursor = state.polled_cursor
-                self._save()
+        state.subscription.cursor = result.cursor
 
     def _deliver(
         self,
@@ -498,12 +407,3 @@ class EventSubscriptionManager:
                 listener(item)
             except Exception:
                 logger.warning("Event inbox listener failed", exc_info=True)
-
-    def _save(self) -> None:
-        if self._store is None:
-            return
-        records = [state.subscription.to_record() for state in self._running.values()]
-        try:
-            self._store.save(records)
-        except OSError:
-            logger.warning("Could not save event subscriptions", exc_info=True)
