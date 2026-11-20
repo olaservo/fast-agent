@@ -1,11 +1,11 @@
 import asyncio
 import json
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast, runtime_checkable
 
 import httpx
 from mcp import Tool
@@ -38,8 +38,11 @@ from fast_agent.core.logging.logger import get_logger
 from fast_agent.event_progress import ProgressAction
 from fast_agent.llm.fastagent_llm import FastAgentLLM, RequestParams
 from fast_agent.llm.provider.error_utils import (
+    EmptyCompletionDiagnostics,
     EmptyCompletionError,
+    attach_empty_completion_diagnostics,
     build_stream_failure_response,
+    empty_completion_diagnostics,
     is_empty_completion,
 )
 from fast_agent.llm.provider.openai._stream_capture import (
@@ -80,6 +83,9 @@ from fast_agent.utils.reasoning_chunk_join import (
     normalize_reasoning_delta,
 )
 from fast_agent.utils.text import strip_casefold, strip_to_none
+
+if TYPE_CHECKING:
+    from fast_agent.config import OpenAISettings
 
 _logger = get_logger(__name__)
 
@@ -189,6 +195,7 @@ class _OpenAICompletionRequest:
 class _OpenAICompletionResponse:
     response: Any
     streamed_reasoning: list[str]
+    streamed: bool = True
 
 
 @dataclass(slots=True)
@@ -230,8 +237,8 @@ class OpenAILLM(
 
         # Set up reasoning-related attributes
         raw_setting = kwargs.get("reasoning_effort")
-        if self.context and self.context.config and self.context.config.openai:
-            config = self.context.config.openai
+        config = self._openai_reasoning_settings()
+        if config is not None:
             if raw_setting is None:
                 raw_setting, warn_deprecated_reasoning_effort = reasoning_setting_from_config(
                     config
@@ -257,6 +264,11 @@ class OpenAILLM(
                 f"Using reasoning model '{chosen_model}' (mode='{self._reasoning_mode}') with "
                 f"'{format_reasoning_setting(self.reasoning_effort)}' reasoning effort"
             )
+
+    def _openai_reasoning_settings(self) -> "OpenAISettings | None":
+        if self.context and self.context.config:
+            return self.context.config.openai
+        return None
 
     async def _download_remote_file(
         self,
@@ -510,7 +522,7 @@ class OpenAILLM(
             self._notify_stream_listeners(StreamChunk(text=normalized_text, is_reasoning=True))
             return reasoning_active
 
-        if reasoning_mode in {"stream", "reasoning_content", "gpt_oss"}:
+        if reasoning_mode in {"stream", "reasoning_content", "gpt_oss", "openai"}:
             # Emit reasoning as-is
             self._notify_stream_listeners(StreamChunk(text=normalized_text, is_reasoning=True))
             return reasoning_active
@@ -644,6 +656,7 @@ class OpenAILLM(
             reasoning_text = self._extract_reasoning_text(
                 reasoning=getattr(delta, "reasoning", None),
                 reasoning_content=getattr(delta, "reasoning_content", None),
+                reasoning_text=getattr(delta, "reasoning_text", None),
             )
             if reasoning_text:
                 raw_reasoning_segments.append(reasoning_text)
@@ -1089,6 +1102,7 @@ class OpenAILLM(
         reasoning_text = OpenAILLM._extract_reasoning_text(
             reasoning=model_extra.get("reasoning"),
             reasoning_content=model_extra.get("reasoning_content"),
+            reasoning_text=model_extra.get("reasoning_text"),
         )
         return [reasoning_text] if reasoning_text.strip() else []
 
@@ -1266,6 +1280,7 @@ class OpenAILLM(
         capture_filename: Path | None,
     ) -> _OpenAICompletionResponse:
         timeout = request.params.streaming_timeout
+        streamed = True
         try:
             stream = await await_stream_start(
                 client.chat.completions.create(**request.arguments),
@@ -1286,6 +1301,15 @@ class OpenAILLM(
                 timed_stream, request.model_name, capture_filename
             )
         except EmptyStreamError as exc:
+            if not self._fallback_to_non_streaming_on_empty_stream(request.model_name):
+                self._record_stream_outcome(
+                    timed_stream.timing,
+                    error=exc,
+                    model=request.model_name,
+                    timeout_seconds=timeout,
+                )
+                raise
+            streamed = False
             self.logger.error(
                 "OpenAI stream returned no usable completion; retrying without streaming",
                 data={
@@ -1293,8 +1317,14 @@ class OpenAILLM(
                     "error": str(exc),
                 },
             )
-            response = await client.chat.completions.create(
-                **self._prepare_non_streaming_request(request.arguments)
+            response = await await_stream_start(
+                client.chat.completions.create(
+                    **self._prepare_non_streaming_request(request.arguments)
+                ),
+                timeout_seconds=timeout,
+                timeout_message=(
+                    f"OpenAI non-streaming fallback did not complete within {timeout} seconds."
+                ),
             )
             choices = _openai_choices(response)
             fallback_message = (
@@ -1325,7 +1355,7 @@ class OpenAILLM(
             self._record_stream_outcome(
                 timed_stream.timing, error=None, model=request.model_name, timeout_seconds=timeout
             )
-        return _OpenAICompletionResponse(response, streamed_reasoning)
+        return _OpenAICompletionResponse(response, streamed_reasoning, streamed)
 
     async def _run_openai_completion_request(
         self,
@@ -1479,6 +1509,27 @@ class OpenAILLM(
             ]
         return channels or None
 
+    def _fallback_to_non_streaming_on_empty_stream(self, model: str) -> bool:
+        """Return whether an empty SSE stream should immediately retry non-streaming."""
+        del model
+        return True
+
+    def _extra_openai_response_channels(
+        self, message: ChatCompletionMessage
+    ) -> dict[str, list[ContentBlock]]:
+        """Optional provider-specific channels extracted from the assistant message."""
+        del message
+        return {}
+
+    def _sanitize_completion_text(self, model: str, text: str) -> str:
+        """Strip provider-specific token artifacts from visible assistant text."""
+        del model
+        return text
+
+    def _unusable_completion_text(self, model: str, text: str) -> str | None:
+        """Describe provider-specific text artifacts that are not usable assistant output."""
+        return None
+
     async def _finalize_openai_completion(
         self,
         request: _OpenAICompletionRequest,
@@ -1499,24 +1550,67 @@ class OpenAILLM(
 
         choice = response.choices[0]
         message = choice.message
-        response_content_blocks = self._append_openai_assistant_history(
-            request.messages, message, request.model_name
-        )
         stop_result = await self._openai_stop_result(choice, message)
-        self.history.set(request.messages)
+        unusable_output = None
+        if (
+            stop_result.stop_reason == LlmStopReason.END_TURN
+            and message.content
+            and not (
+                message.tool_calls or message.function_call or message.refusal or message.audio
+            )
+        ):
+            unusable_output = self._unusable_completion_text(request.model_name, message.content)
+        if unusable_output is None:
+            if isinstance(message.content, str) and message.content:
+                sanitized = self._sanitize_completion_text(request.model_name, message.content)
+                if sanitized != message.content:
+                    message = message.model_copy(update={"content": sanitized})
+            response_content_blocks = self._append_openai_assistant_history(
+                request.messages, message, request.model_name
+            )
+            self.history.set(request.messages)
+        else:
+            # Present an empty completion to the one-shot retry, without committing the artifact.
+            response_content_blocks = []
+            self._notify_stream_listeners(StreamChunk(event="rollback"))
         self._log_chat_finished(model=request.model_name)
         reasoning_blocks = self._openai_reasoning_blocks(completion.streamed_reasoning)
-        return PromptMessageExtended(
+        channels = self._openai_response_channels(
+            reasoning_blocks=reasoning_blocks,
+            choice=choice,
+            stop_result=stop_result,
+        )
+        if unusable_output is None:
+            extra_channels = self._extra_openai_response_channels(message)
+            if extra_channels:
+                channels = {**(channels or {}), **extra_channels}
+        result = PromptMessageExtended(
             role="assistant",
             content=response_content_blocks,
             tool_calls=stop_result.requested_tool_calls,
-            channels=self._openai_response_channels(
-                reasoning_blocks=reasoning_blocks,
-                choice=choice,
-                stop_result=stop_result,
-            ),
+            channels=channels,
             stop_reason=stop_result.stop_reason,
         )
+
+        usage = _openai_usage(response)
+        details = usage.completion_tokens_details if usage is not None else None
+        diag_reasoning_tokens = details.reasoning_tokens if details is not None else None
+        if diag_reasoning_tokens is None and usage is not None and usage.model_extra:
+            raw_reasoning_tokens = usage.model_extra.get("reasoning_tokens")
+            if isinstance(raw_reasoning_tokens, int) and not isinstance(raw_reasoning_tokens, bool):
+                diag_reasoning_tokens = raw_reasoning_tokens
+        attach_empty_completion_diagnostics(
+            result,
+            EmptyCompletionDiagnostics(
+                finish_reason=choice.finish_reason,
+                completion_tokens=usage.completion_tokens if usage is not None else None,
+                reasoning_tokens=diag_reasoning_tokens,
+                reasoning_chars=sum(len(part) for part in completion.streamed_reasoning),
+                streamed=completion.streamed,
+                unusable_output=unusable_output,
+            ),
+        )
+        return result
 
     async def _openai_completion(
         self,
@@ -1536,16 +1630,26 @@ class OpenAILLM(
         # As for OpenAI Responses: an end_turn with nothing in it (often a stream cut
         # off mid-reasoning) would end the agent loop, so ask once more.
         model_name = self._openai_completion_model_name(request_params)
+        diagnostics = empty_completion_diagnostics(response)
         self.logger.warning(
-            "OpenAI completion returned no assistant content or tool calls; retrying once",
-            data={"model": model_name},
+            "Chat completion returned unusable assistant output; retrying once"
+            if diagnostics.unusable_output
+            else "OpenAI completion returned no assistant content or tool calls; retrying once",
+            data={"model": model_name, "empty_completion": asdict(diagnostics)},
         )
         retry = await self._openai_completion_once(message, request_params, tools)
         if is_empty_completion(retry):
-            error = EmptyCompletionError()
-            self.logger.error(str(error), data={"model": model_name})
+            attempts = (diagnostics, empty_completion_diagnostics(retry))
+            error = EmptyCompletionError(attempts)
+            self.logger.error(
+                str(error),
+                data={
+                    "model": model_name,
+                    "empty_completion_attempts": [asdict(a) for a in attempts],
+                },
+            )
             retry = build_stream_failure_response(self.provider, error, model_name)
-        append_retry_channel(retry, [self._empty_completion_retry()])
+        append_retry_channel(retry, [self._empty_completion_retry(diagnostics)])
         return retry
 
     async def _openai_completion_once(
@@ -1571,8 +1675,8 @@ class OpenAILLM(
         return await self._finalize_openai_completion(request, completion)
 
     def _handle_retry_failure(self, error: Exception) -> PromptMessageExtended | None:
-        """Return the legacy error-channel response when retries are exhausted."""
-        if isinstance(error, APIError):
+        """Persist exhausted provider failures without hiding programming/config errors."""
+        if isinstance(error, (APIError, TimeoutError, EmptyStreamError)):
             model_name = self.default_request_params.model or DEFAULT_OPENAI_MODEL
             return build_stream_failure_response(self.provider, error, model_name)
         return None
@@ -1682,10 +1786,14 @@ class OpenAILLM(
         return non_stream_args
 
     @staticmethod
-    def _extract_reasoning_text(reasoning: Any = None, reasoning_content: Any | None = None) -> str:
+    def _extract_reasoning_text(
+        reasoning: Any = None,
+        reasoning_content: Any | None = None,
+        reasoning_text: Any | None = None,
+    ) -> str:
         """Extract text from provider-specific reasoning payloads.
 
-        Priority: explicit `reasoning` field (string/object/list) > `reasoning_content` list.
+        Priority: explicit `reasoning` field > `reasoning_content` > `reasoning_text`.
         """
         combined = _combine_reasoning_text(reasoning)
         if combined.strip():
@@ -1698,6 +1806,10 @@ class OpenAILLM(
             )
             if reasoning_content_text:
                 return reasoning_content_text
+        if reasoning_text is not None:
+            coerced = _combine_reasoning_text(reasoning_text)
+            if coerced:
+                return coerced
 
         return combined
 

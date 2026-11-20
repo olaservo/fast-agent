@@ -57,6 +57,12 @@
       "mark": "qwen.svg"
     },
     {
+      "id": "hunyuan",
+      "name": "Hunyuan",
+      "maker": "Tencent",
+      "mark": "hunyuan.svg"
+    },
+    {
       "id": "muse",
       "name": "Muse",
       "maker": "Meta",
@@ -271,6 +277,25 @@
       "family": "kimi",
       "status": "PTC"
     },
+    "tb4-fable52-low-noptc": {
+      "benchmark": "terminal-bench-4.0-subset",
+      "family": "anthropic"
+    },
+    "tb4-sol62-high-ptc": {
+      "benchmark": "terminal-bench-4.0-subset",
+      "family": "gpt-6",
+      "status": "PTC"
+    },
+    "tb4-gemini4neon-medium-ptc": {
+      "benchmark": "terminal-bench-4.0-subset",
+      "family": "gemini",
+      "status": "PTC"
+    },
+    "tb4-gemini4hydrogen-high-ptc": {
+      "benchmark": "terminal-bench-4.0-subset",
+      "family": "gemini",
+      "status": "PTC"
+    },
     "tb4-glm53flash-max-ptc": {
       "benchmark": "terminal-bench-4.0-subset",
       "family": "glm",
@@ -279,6 +304,11 @@
     "kimik31pro-high-6h": {
       "family": "kimi",
       "status": "PTC"
+    },
+    "tb21-hy4flash-high-noptc-6h": {
+      "family": "hunyuan",
+      "status": "6h timeout",
+      "costFrom": "scored"
     }
   },
   "claims": [
@@ -490,6 +520,7 @@
     "Gemini": "gemini",
     "Qwen": "qwen",
     "Muse": "muse",
+    "Tencent HY-": "hunyuan",
     "Kimi": "kimi"
   }
 }

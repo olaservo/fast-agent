@@ -1066,6 +1066,9 @@ def build_run(
         "cost": {
             "total_usd": round(total_cost, 2),
             "total_usd_exact": total_cost,
+            "scored_total_usd_exact": round(
+                sum(t["cost_usd"] for t in selected if t["cost_usd"] is not None), 6
+            ),
             "trials_with_cost": selected_costed,
             "trials": len(selected),
             "excluded_trials_with_cost": len(costs) - selected_costed,
@@ -1316,6 +1319,10 @@ def write_moments(
     import moments
 
     inputs, extra, expect = scan_inputs
+    if "bucket" in run:
+        # The viewer pins trace files without following symlinks. Bucket caches
+        # can be symlinked to another drive, so pass their canonical paths.
+        inputs = [str(Path(path).resolve()) for path in inputs]
     tmp = Path(tempfile.mkdtemp(prefix="fa-highlights-"))
     try:
         target = tmp / "hl"

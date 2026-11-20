@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
     from fast_agent.core.agent_app import AgentApp
     from fast_agent.core.harness import HarnessSession
+    from fast_agent.mcp_server_registry import ServerRegistry
     from fast_agent.session.session_manager import SessionManager
     from fast_agent.types import PromptMessageExtended
 
@@ -263,23 +264,37 @@ async def _resolve_cli_attachment_blocks(
     return resolved.resources
 
 
+async def _expand_cli_tool_mentions(
+    agent_obj: Any,
+    messages: list["PromptMessageExtended"],
+) -> None:
+    from fast_agent.ptc.mentions import ToolMentionError, expand_agent_tool_mentions
+
+    try:
+        for message in messages:
+            if message.role == "user":
+                await expand_agent_tool_mentions(agent_obj, message)
+    except ToolMentionError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
 async def _build_cli_message_payload(
     agent_obj: Any,
     message: str,
     attachments: list[str] | None,
 ) -> str | "PromptMessageExtended":
-    blocks = await _resolve_cli_attachment_blocks(agent_obj, attachments)
-    if not blocks:
-        return message
-
     from mcp_types import TextContent
 
     from fast_agent.types import PromptMessageExtended
 
-    return PromptMessageExtended(
+    blocks = await _resolve_cli_attachment_blocks(agent_obj, attachments)
+    payload = PromptMessageExtended(
         role="user",
         content=[TextContent(type="text", text=message), *blocks],
     )
+    await _expand_cli_tool_mentions(agent_obj, [payload])
+    return payload if len(payload.content) > 1 else message
 
 
 async def _build_cli_prompt_file_payload(
@@ -288,10 +303,11 @@ async def _build_cli_prompt_file_payload(
     attachments: list[str] | None,
 ) -> list["PromptMessageExtended"]:
     blocks = await _resolve_cli_attachment_blocks(agent_obj, attachments)
-    if not blocks:
-        return prompt
-
     prompt_with_attachments = [message.model_copy(deep=True) for message in prompt]
+    await _expand_cli_tool_mentions(agent_obj, prompt_with_attachments)
+    if not blocks:
+        return prompt_with_attachments
+
     for message in reversed(prompt_with_attachments):
         if message.role == "user":
             message.content.extend(blocks)
@@ -328,14 +344,37 @@ async def _save_result_history(
     messages_override: list["PromptMessageExtended"] | None = None,
 ) -> None:
     from fast_agent.history.history_exporter import HistoryExporter
-    from fast_agent.mcp.prompt_serialization import save_messages
+    from fast_agent.mcp.prompt_serialization import save_messages, to_json_bytes
+    from fast_agent.ptc.vocabulary import PTC_VOCABULARY_META
+    from fast_agent.tools.tool_surface import ToolExposure, ToolSurfaceProvider
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    agent_obj = agent_app._agent(agent_name)
+    if output_path.suffix.casefold() == ".json" and isinstance(agent_obj, ToolSurfaceProvider):
+        surface = await agent_obj.tool_surface()
+        if surface.programmatic is not None:
+            # Record the actual surface even when the model never calls the code tool.
+            messages = (
+                messages_override if messages_override is not None else agent_obj.message_history
+            )
+            payload = to_json_bytes(
+                messages,
+                metadata={
+                    PTC_VOCABULARY_META: surface.programmatic.vocabulary,
+                    "ptc_functions": [
+                        tool.python_name for tool in surface.exposed(ToolExposure.PROGRAMMATIC)
+                    ],
+                    "ptc_deferred_functions": [
+                        tool.python_name for tool in surface.programmatic_functions(deferred=True)
+                    ],
+                },
+            )
+            await asyncio.to_thread(output_path.write_bytes, payload)
+            return
     if messages_override is not None:
         save_messages(messages_override, str(output_path))
         return
 
-    agent_obj = agent_app._agent(agent_name)
     await HistoryExporter.save(agent_obj, str(output_path))
 
 
@@ -1067,6 +1106,7 @@ async def _apply_runtime_context_overrides(fast: Any, request: AgentRunRequest) 
         or request.no_shell
         or request.prefer_local_shell
         or request.ptc is not None
+        or request.ptc_search is not None
     ):
         return
 
@@ -1083,6 +1123,8 @@ async def _apply_runtime_context_overrides(fast: Any, request: AgentRunRequest) 
         config.shell_execution.prefer_local_shell = True
     if request.ptc is not None:
         context.ptc_enabled = request.ptc
+    if request.ptc_search is not None:
+        context.ptc_search = request.ptc_search
 
 
 async def _add_cli_servers(fast: Any, request: AgentRunRequest) -> None:
@@ -1473,11 +1515,16 @@ async def _run_initialized_agent_request(
         await cli_agent()
 
 
-async def _rollback_cli_startup(fast: Any, request: AgentRunRequest) -> None:
+def _server_registry(fast: Any) -> ServerRegistry | None:
+    """The core's server registry, or None once the core is disposed or never initialized."""
     try:
-        registry = fast.app.context.server_registry
+        return fast.app.context.server_registry
     except RuntimeError:
-        registry = None
+        return None
+
+
+async def _rollback_cli_startup(fast: Any, request: AgentRunRequest) -> None:
+    registry = _server_registry(fast)
     if registry is not None:
         for server_name in request.startup_mcp_servers or ():
             registry.remove_runtime(server_name, owner=_cli_startup_owner(request))
@@ -1539,8 +1586,12 @@ def _classify_cli_mcp_failure(
         )
     else:
         surface = "harness_startup"
-        registry = fast.app.context.server_registry
-        registry_origin = registry.get_server_origin(server_name) if server_name else None
+        registry = _server_registry(fast)
+        registry_origin = (
+            registry.get_server_origin(server_name)
+            if registry is not None and server_name
+            else None
+        )
         origin = registry_origin if registry_origin in {"central", "card"} else "session"
         input_ref = request.config_path or server_name or "MCP configuration"
         explicit_auth = False
@@ -1584,6 +1635,10 @@ async def run_agent_request(request: AgentRunRequest) -> None:
             instruction=instruction,
             serve_permissions_enabled=serve_permissions_enabled,
         )
+    except SystemExit:
+        # Already reported (the harness renders startup errors before exiting).
+        await _rollback_cli_startup(fast, request)
+        raise
     except BaseException as exc:
         failure = _classify_cli_mcp_failure(
             fast,

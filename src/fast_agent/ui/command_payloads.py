@@ -183,6 +183,14 @@ class ClearCommand(CommandBase):
 
 
 @dataclass(frozen=True, slots=True)
+class WarmCommand(CommandBase):
+    action: Literal["start", "off", "status"] = "start"
+    minutes: int | None = None
+    error: str | None = None
+    kind: Literal["warm"] = "warm"
+
+
+@dataclass(frozen=True, slots=True)
 class CompactCommand(CommandBase):
     action: Literal["run", "preview", "prompt"] = "run"
     instructions: str | None = None
@@ -519,6 +527,7 @@ CommandPayload = (
     | HistoryViewCommand
     | ClearCommand
     | CompactCommand
+    | WarmCommand
     | SkillsCommand
     | PacksCommand
     | PluginsCommand

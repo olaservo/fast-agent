@@ -314,6 +314,12 @@ def go(
     client_metadata_url: str | None = CommonAgentOptions.client_metadata_url(),
     mcp_protocol: McpProtocolOption | None = CommonAgentOptions.mcp_protocol(),
     model: str | None = CommonAgentOptions.model(),
+    neon: bool = typer.Option(False, "--neon", help="Select native Google Gemini 4 Neon."),
+    argon: bool = typer.Option(False, "--argon", help="Select native Google Gemini 4 Argon."),
+    hydrogen: bool = typer.Option(
+        False, "--hydrogen", help="Select native Google Gemini 4 Hydrogen."
+    ),
+    carbon: bool = typer.Option(False, "--carbon", help="Select native Google Gemini 4 Carbon."),
     base_url: str | None = typer.Option(
         None,
         "--base-url",
@@ -396,6 +402,7 @@ def go(
     subagents: bool | None = CommonAgentOptions.subagents(),
     subagent_model: str | None = CommonAgentOptions.subagent_model(),
     ptc: bool | None = CommonAgentOptions.ptc(),
+    ptc_all: bool = CommonAgentOptions.ptc_all(),
     reload: bool = typer.Option(
         False,
         "--reload",
@@ -444,6 +451,23 @@ def go(
             "--watch": watch,
         },
     )
+
+    shortcuts = [
+        name
+        for name, selected in (
+            ("neon", neon),
+            ("argon", argon),
+            ("hydrogen", hydrogen),
+            ("carbon", carbon),
+        )
+        if selected
+    ]
+    if shortcuts:
+        if len(shortcuts) > 1 or model is not None:
+            raise typer.BadParameter(
+                "Choose only one of --model/--models, --neon, --argon, --hydrogen, or --carbon."
+            )
+        model = f"google.gemini-4-{shortcuts[0]}"
 
     base_url = _resolve_model_base_url_option(
         base_url,
@@ -570,6 +594,7 @@ def go(
         subagents=subagents,
         subagent_model=subagent_model,
         ptc=ptc,
+        ptc_all=ptc_all,
         mode="interactive",
         instance_scope="shared",
         reload=reload,
