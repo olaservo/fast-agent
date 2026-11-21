@@ -73,8 +73,10 @@ from fast_agent.mcp.common import (
     is_namespaced_name,
 )
 from fast_agent.mcp.events_extension import (
+    EventFrameHandler,
     ListEventsResult,
     PollEventsResult,
+    StreamEventsResult,
     server_supports_mcp_events,
 )
 from fast_agent.mcp.events_subscriptions import (
@@ -927,7 +929,11 @@ class MCPAggregator(ContextDependent):
         for declared in config.events:
             try:
                 await self.events.subscribe(
-                    server_name, declared.name, declared.arguments, wake=declared.wake
+                    server_name,
+                    declared.name,
+                    declared.arguments,
+                    wake=declared.wake,
+                    delivery=declared.delivery,
                 )
             except (ValueError, MCPError) as exc:
                 logger.warning(
@@ -4090,6 +4096,35 @@ class MCPAggregator(ContextDependent):
             operation_type="events/poll",
             operation_name=name,
             method_name="poll_events",
+            method_args=method_args,
+        )
+
+    async def stream_events(
+        self,
+        server_name: str,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        cursor: str | None = None,
+        on_frame: EventFrameHandler,
+    ) -> StreamEventsResult:
+        """Hold one push subscription open on one server via SEP-3415.
+
+        Returns when the server closes the stream. Cancel the call to end it.
+        """
+        server_name = await self._require_events_server(server_name)
+        method_args: dict[str, Any] = {
+            "name": name,
+            "arguments": arguments or {},
+            "on_frame": on_frame,
+        }
+        if cursor is not None:
+            method_args["cursor"] = cursor
+        return await self._execute_on_server(
+            server_name=server_name,
+            operation_type="events/stream",
+            operation_name=name,
+            method_name="stream_events",
             method_args=method_args,
         )
 

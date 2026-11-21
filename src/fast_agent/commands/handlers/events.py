@@ -15,13 +15,18 @@ from fast_agent.utils.text import strip_casefold
 if TYPE_CHECKING:
     from fast_agent.commands.context import CommandContext
     from fast_agent.mcp.events_extension import EventDescriptor
-    from fast_agent.mcp.events_subscriptions import EventSubscriptionManager
+    from fast_agent.mcp.events_subscriptions import (
+        EventSubscriptionManager,
+        SubscriptionDelivery,
+    )
 
 EVENTS_USAGE = (
-    "Usage: /events [list [server]|subscribe <server> <event> [key=value ...] [--wake]|"
+    "Usage: /events [list [server]|"
+    "subscribe <server> <event> [key=value ...] [--wake] [--poll|--push]|"
     "poll <id>|unsubscribe <id>|unsubscribe all]"
 )
 WAKE_FLAG = "--wake"
+DELIVERY_FLAGS: dict[str, SubscriptionDelivery] = {"--poll": "poll", "--push": "push"}
 
 
 class _EventsAggregator(Protocol):
@@ -98,11 +103,20 @@ async def handle_events(
             _add_markdown(outcome, text, "events list")
         elif action == "subscribe" and len(rest) >= 2:
             wake = WAKE_FLAG in rest
-            arguments = [token for token in rest[2:] if token != WAKE_FLAG]
+            requested = {DELIVERY_FLAGS[token] for token in rest if token in DELIVERY_FLAGS}
+            if len(requested) > 1:
+                raise ValueError("Use one of --poll and --push")
+            arguments = [
+                token for token in rest[2:] if token != WAKE_FLAG and token not in DELIVERY_FLAGS
+            ]
             subscription = await aggregator.events.subscribe(
-                rest[0], rest[1], parse_event_arguments(arguments), wake=wake
+                rest[0],
+                rest[1],
+                parse_event_arguments(arguments),
+                wake=wake,
+                delivery=requested.pop() if requested else None,
             )
-            delivery = (
+            arrival = (
                 "Events start a turn when the prompt is idle."
                 if wake
                 else "Events are added to the next model call."
@@ -110,13 +124,13 @@ async def handle_events(
             _add_markdown(
                 outcome,
                 f"Subscribed to `{subscription.name}` on `{subscription.server_name}` "
-                f"as `{subscription.key}`. {delivery}",
+                f"as `{subscription.key}`, by {subscription.delivery}. {arrival}",
                 "events subscribe",
             )
         elif action == "poll" and len(rest) == 1:
             if not aggregator.events.poll_now(rest[0]):
                 raise ValueError(f"No active subscription with id '{rest[0]}'")
-            _add_markdown(outcome, f"Polling `{rest[0]}` now.", "events poll")
+            _add_markdown(outcome, _render_poll_now(aggregator, rest[0]), "events poll")
         elif action == "unsubscribe" and len(rest) == 1:
             _add_markdown(outcome, await _unsubscribe(aggregator, rest[0]), "events unsubscribe")
         else:
@@ -130,6 +144,16 @@ def _add_markdown(outcome: CommandOutcome, text: str, right_info: str) -> None:
     outcome.add_message(text, right_info=right_info, render_markdown=True)
 
 
+def _render_poll_now(aggregator: _EventsAggregator, key: str) -> str:
+    deliveries = {
+        subscription.key: subscription.delivery
+        for subscription in aggregator.events.subscriptions()
+    }
+    if deliveries.get(key) == "push":
+        return f"`{key}` is delivered by push. Its stream reconnects now if it is down."
+    return f"Polling `{key}` now."
+
+
 def _render_status(aggregator: _EventsAggregator) -> str:
     manager = aggregator.events
     subscriptions = manager.subscriptions()
@@ -137,8 +161,8 @@ def _render_status(aggregator: _EventsAggregator) -> str:
         return "No event subscriptions. Use `/events list` to see what servers offer."
 
     lines = [
-        "| id | server | event | arguments | wake | status | delivered |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| id | server | event | arguments | mode | wake | status | delivered |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for subscription in subscriptions:
         status = subscription.status
@@ -150,6 +174,7 @@ def _render_status(aggregator: _EventsAggregator) -> str:
             f"| {escape_markdown_table_cell(subscription.server_name)} "
             f"| {escape_markdown_table_cell(subscription.name)} "
             f"| {escape_markdown_table_cell(markdown_code_span(arguments))} "
+            f"| {subscription.delivery} "
             f"| {'yes' if subscription.wake else 'no'} "
             f"| {escape_markdown_table_cell(status)} "
             f"| {subscription.delivered} |"
@@ -188,8 +213,8 @@ def _render_descriptor(descriptor: EventDescriptor) -> str:
     line = f"- `{descriptor.name}` ({delivery})"
     if descriptor.description:
         line += f": {descriptor.description}"
-    if not descriptor.supports("poll"):
-        line += " Not subscribable here: poll delivery only."
+    if not descriptor.supports("poll") and not descriptor.supports("push"):
+        line += " Not subscribable here: poll and push delivery only."
 
     schema = descriptor.input_schema or {}
     properties = schema.get("properties")

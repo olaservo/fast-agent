@@ -693,6 +693,9 @@ class MCPEventSubscriptionSettings(BaseModel):
     wake: bool = False
     """Whether an arrival starts a turn in an idle agent."""
 
+    delivery: Literal["poll", "push"] | None = None
+    """The delivery mode. Left out, push is used when the event type offers it."""
+
     model_config = ConfigDict(extra="forbid")
 
 
