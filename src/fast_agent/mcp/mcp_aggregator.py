@@ -77,10 +77,12 @@ from fast_agent.mcp.events_extension import (
     PollEventsResult,
     server_supports_mcp_events,
 )
+from fast_agent.mcp.events_stream import EventStream
 from fast_agent.mcp.events_subscriptions import (
     EventInboxItem,
     EventSubscription,
     EventSubscriptionManager,
+    SubscriptionDelivery,
     SubscriptionOrigin,
     build_event_prompt_message,
     format_event_messages,
@@ -943,6 +945,7 @@ class MCPAggregator(ContextDependent):
                     once=declared.once,
                     min_poll_ms=declared.min_poll_ms,
                     origin="declared",
+                    delivery=declared.delivery,
                 )
             except (ValueError, MCPError) as exc:
                 logger.warning(
@@ -4133,6 +4136,7 @@ class MCPAggregator(ContextDependent):
         origin: SubscriptionOrigin = "user",
         cursor: str | None = None,
         max_age_ms: int | None = None,
+        delivery: SubscriptionDelivery | None = None,
     ) -> EventSubscription:
         """Restore a persisted event subscription via the subscription manager."""
         resolved_server = self._resolve_server_key(server_name)
@@ -4146,6 +4150,7 @@ class MCPAggregator(ContextDependent):
             origin=origin,
             cursor=cursor,
             max_age_ms=max_age_ms,
+            delivery=delivery,
         )
 
     def record_event_wake_turn(self) -> None:
@@ -4254,6 +4259,27 @@ class MCPAggregator(ContextDependent):
             operation_type="events/poll",
             operation_name=name,
             method_name="poll_events",
+            method_args=method_args,
+        )
+
+    async def open_event_stream(
+        self,
+        server_name: str,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        cursor: str | None = None,
+    ) -> EventStream:
+        """Open one push subscription on one server via SEP-3415."""
+        server_name = await self._require_events_server(server_name)
+        method_args: dict[str, Any] = {"name": name, "arguments": arguments or {}}
+        if cursor is not None:
+            method_args["cursor"] = cursor
+        return await self._execute_on_server(
+            server_name=server_name,
+            operation_type="events/stream",
+            operation_name=name,
+            method_name="open_event_stream",
             method_args=method_args,
         )
 
