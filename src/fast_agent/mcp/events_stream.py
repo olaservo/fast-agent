@@ -1,10 +1,9 @@
-"""Client-side routing for MCP Events push delivery (SEP-3415 ``events/stream``)."""
+"""Client-side streams for MCP Events push delivery (SEP-3415 ``events/stream``)."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from dataclasses import dataclass
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from mcp.client.extension import ClientExtension, NotificationBinding
@@ -14,7 +13,6 @@ from mcp.shared.subscriptions import SUBSCRIPTION_ID_META_KEY
 from fast_agent.mcp.events_extension import (
     EVENT_STREAM_NOTIFICATIONS,
     EVENTS_EXTENSION,
-    EventFrameHandler,
     EventStreamFrame,
 )
 
@@ -26,33 +24,56 @@ if TYPE_CHECKING:
 STREAM_OPEN_TIMEOUT_SECONDS = 30.0
 
 
-@dataclass
-class _Stream:
-    on_frame: EventFrameHandler
-    bound: asyncio.Future[None]
-    subscription_id: RequestId | None = None
+class EventStream:
+    """One open ``events/stream`` request, as an async iterator of its messages.
+
+    Iteration ends when the server closes the stream, and raises what the
+    request raised when it failed. ``aclose`` cancels the request, which ends
+    the subscription on the server.
+    """
+
+    def __init__(self, request: asyncio.Future[object]) -> None:
+        self.request = request
+        self.frames: deque[EventStreamFrame] = deque()
+        self.changed = asyncio.Event()
+        request.add_done_callback(lambda _: self.changed.set())
+
+    def __aiter__(self) -> EventStream:
+        return self
+
+    async def __anext__(self) -> EventStreamFrame:
+        while not self.frames:
+            if self.request.done():
+                if not self.request.cancelled():
+                    self.request.result()
+                raise StopAsyncIteration
+            self.changed.clear()
+            await self.changed.wait()
+        return self.frames.popleft()
+
+    async def aclose(self) -> None:
+        self.request.cancel()
+        await asyncio.gather(self.request, return_exceptions=True)
 
 
 class EventStreamRouter(ClientExtension):
-    """Advertise the Events extension and hand each stream its notifications.
+    """Advertise the Events extension and give each open stream its messages.
 
-    A ``notifications/events/*`` message names its stream by the id of the
-    ``events/stream`` request. ``ClientSession.send_request`` does not report
-    the id it assigns, so streams open one at a time and the first message
-    with an unknown id belongs to the stream that is opening.
+    A message names its stream by the id of the ``events/stream`` request.
+    ``ClientSession.send_request`` does not report the id it assigns, so
+    streams open one at a time and the first message with an unknown id
+    belongs to the stream that is opening.
 
-    The SDK delivers each notification method through its own queue, so two
-    messages of different kinds can arrive here out of wire order. A cursor
-    that moves backwards replays events on reconnect, and the subscription
-    manager drops those by ``eventId``.
+    The SDK queues each notification method separately, so messages of
+    different kinds can arrive out of wire order.
     """
 
     identifier = EVENTS_EXTENSION
 
     def __init__(self, *, open_timeout_seconds: float = STREAM_OPEN_TIMEOUT_SECONDS) -> None:
         self._open_timeout_seconds = open_timeout_seconds
-        self._streams: dict[RequestId, _Stream] = {}
-        self._opening: _Stream | None = None
+        self._streams: dict[RequestId, EventStream] = {}
+        self._opening: EventStream | None = None
         self._open_lock = asyncio.Lock()
 
     def notifications(self) -> list[NotificationBinding[Any]]:
@@ -68,45 +89,31 @@ class EventStreamRouter(ClientExtension):
         subscription_id = coerce_request_id(raw_id)
         stream = self._streams.get(subscription_id)
         if stream is None:
-            stream = self._opening
+            stream, self._opening = self._opening, None
             if stream is None:
                 return
-            self._opening = None
-            stream.subscription_id = subscription_id
             self._streams[subscription_id] = stream
-            stream.bound.set_result(None)
-        stream.on_frame(frame)
+            stream.request.add_done_callback(lambda _: self._streams.pop(subscription_id, None))
+        stream.frames.append(frame)
+        stream.changed.set()
 
-    async def run[T](self, send: Callable[[], Awaitable[T]], on_frame: EventFrameHandler) -> T:
-        """Hold one stream open and return the result that closes it.
+    async def open(self, send: Callable[[], Awaitable[object]]) -> EventStream:
+        """Send an ``events/stream`` request and return its stream once a message arrives.
 
-        ``send`` issues the ``events/stream`` request. Cancel this call to end
-        the stream. Raises what the request raises, and ``TimeoutError`` when
-        the server neither answers nor sends a message within the open timeout.
+        Raises what the request raises when the server rejects it, and
+        ``TimeoutError`` when the server stays silent.
         """
-        stream = _Stream(on_frame, asyncio.get_running_loop().create_future())
-        request: asyncio.Future[T] | None = None
-        try:
-            async with self._open_lock:
-                self._opening = stream
-                request = asyncio.ensure_future(send())
-                try:
-                    done, _ = await asyncio.wait(
-                        {request, stream.bound},
-                        timeout=self._open_timeout_seconds,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                finally:
-                    stream.bound.cancel()
-                    if self._opening is stream:
-                        self._opening = None
-                if not done:
-                    raise TimeoutError("The server did not confirm the event stream")
-            return await request
-        finally:
-            if request is not None and not request.done():
-                request.cancel()
-                with suppress(asyncio.CancelledError):
-                    await request
-            if stream.subscription_id is not None:
-                self._streams.pop(stream.subscription_id, None)
+        async with self._open_lock:
+            stream = self._opening = EventStream(asyncio.ensure_future(send()))
+            try:
+                async with asyncio.timeout(self._open_timeout_seconds):
+                    await stream.changed.wait()
+                if not stream.frames:
+                    await stream.request
+                    raise RuntimeError("The server closed the event stream before any message")
+            except BaseException:
+                await stream.aclose()
+                raise
+            finally:
+                self._opening = None
+        return stream

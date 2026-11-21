@@ -523,7 +523,7 @@ def _discovery_top_level_catalog() -> tuple[CommandIndexEntry, ...]:
                 },
                 {
                     "name": "poll",
-                    "summary": "poll a subscription now, or reconnect its stream",
+                    "summary": "poll a subscription now, or reopen its stream",
                     "usage": "/events poll <id>",
                 },
                 {

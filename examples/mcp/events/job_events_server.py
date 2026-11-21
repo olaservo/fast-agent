@@ -28,11 +28,10 @@ from fast_agent.mcp.events_extension import (
 EVENT_NAME = "job.status_changed"
 POLL_INTERVAL_MS = 1_000
 HEARTBEAT_MS = 15_000
+STREAM_CHECK_SECONDS = 0.05
 
 # job_id -> [(stage, timestamp)], oldest first. The cursor is an index into this list.
 job_history: dict[str, list[tuple[str, str]]] = {}
-# Set when any job changes stage, then replaced, so open streams wake up.
-job_changed = asyncio.Event()
 
 
 async def list_events(ctx: Any, params: PaginatedRequestParams) -> ListEventsResult:
@@ -57,17 +56,19 @@ async def list_events(ctx: Any, params: PaginatedRequestParams) -> ListEventsRes
     )
 
 
-def _job_id(name: str, arguments: dict[str, Any]) -> str:
-    if name != EVENT_NAME:
+def _subscription(params: PollEventsRequestParams | StreamEventsRequestParams) -> tuple[str, int]:
+    """Check a subscription and return its job and the position it resumes from."""
+    if params.name != EVENT_NAME:
         raise MCPError(EVENTS_NOT_FOUND, "NotFound", {"kind": "event"})
-    job_id = arguments.get("job_id")
+    job_id = params.arguments.get("job_id")
     if not isinstance(job_id, str):
         raise MCPError(INVALID_PARAMS, "job_id is required")
-    return job_id
+    if params.cursor is None:
+        return job_id, len(job_history.get(job_id, []))
+    return job_id, int(params.cursor)
 
 
 def _occurrences(job_id: str, start: int) -> list[EventOccurrence]:
-    """The stage changes of a job from position ``start``, each with the cursor after it."""
     return [
         EventOccurrence(
             event_id=f"{job_id}:{index}:{stage}",
@@ -80,24 +81,18 @@ def _occurrences(job_id: str, start: int) -> list[EventOccurrence]:
     ]
 
 
-def _start(job_id: str, cursor: str | None) -> int:
-    return len(job_history.get(job_id, [])) if cursor is None else int(cursor)
-
-
 async def poll_events(ctx: Any, params: PollEventsRequestParams) -> PollEventsResult:
     del ctx
-    job_id = _job_id(params.name, params.arguments)
+    job_id, start = _subscription(params)
     return PollEventsResult(
-        events=_occurrences(job_id, _start(job_id, params.cursor)),
+        events=_occurrences(job_id, start),
         cursor=str(len(job_history.get(job_id, []))),
         next_poll_ms=POLL_INTERVAL_MS,
     )
 
 
 async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEventsResult:
-    """Deliver a job's stage changes on the request's stream until the client cancels it."""
-    job_id = _job_id(params.name, params.arguments)
-    position = _start(job_id, params.cursor)
+    job_id, position = _subscription(params)
     heartbeat_ms = params.heartbeat_ms or HEARTBEAT_MS
     meta = {SUBSCRIPTION_ID_META_KEY: ctx.request_id}
     loop = asyncio.get_running_loop()
@@ -105,26 +100,22 @@ async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEv
     async def send(kind: str, frame: BaseModel) -> None:
         notification = Notification[dict[str, Any], str](
             method=f"notifications/events/{kind}",
-            params=frame.model_dump(by_alias=True, exclude_none=True),
+            params=frame.model_dump(by_alias=True, exclude_none=True) | {"_meta": meta},
         )
         await ctx.session.send_notification(notification, related_request_id=ctx.request_id)
 
-    await send(
-        "active", EventStreamActive(cursor=str(position), heartbeat_ms=heartbeat_ms, meta=meta)
-    )
-    quiet_until = loop.time() + heartbeat_ms / 1000
+    await send("active", EventStreamActive(cursor=str(position), heartbeat_ms=heartbeat_ms))
+    last_sent = loop.time()
+    # The stream runs until the client cancels the request.
     while True:
-        changed = job_changed
         for occurrence in _occurrences(job_id, position):
-            await send("event", occurrence.model_copy(update={"meta": meta}))
+            await send("event", occurrence)
             position += 1
-            quiet_until = loop.time() + heartbeat_ms / 1000
-        try:
-            async with asyncio.timeout_at(quiet_until):
-                await changed.wait()
-        except TimeoutError:
-            await send("heartbeat", EventStreamHeartbeat(cursor=str(position), meta=meta))
-            quiet_until = loop.time() + heartbeat_ms / 1000
+            last_sent = loop.time()
+        if loop.time() - last_sent >= heartbeat_ms / 1000:
+            await send("heartbeat", EventStreamHeartbeat(cursor=str(position)))
+            last_sent = loop.time()
+        await asyncio.sleep(STREAM_CHECK_SECONDS)
 
 
 class JobEvents(Extension):
@@ -142,13 +133,10 @@ server = MCPServer("events", extensions=[JobEvents()])
 
 
 @server.tool()
-async def set_job_stage(job_id: str, stage: str) -> str:
+def set_job_stage(job_id: str, stage: str) -> str:
     """Record a new stage for a job, which fires job.status_changed."""
-    global job_changed
     timestamp = datetime.now(UTC).isoformat()
     job_history.setdefault(job_id, []).append((stage, timestamp))
-    job_changed.set()
-    job_changed = asyncio.Event()
     return f"{job_id} is now {stage}"
 
 

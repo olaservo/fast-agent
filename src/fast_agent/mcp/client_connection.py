@@ -35,7 +35,6 @@ from fast_agent.core.exceptions import ServerSessionTerminatedError
 from fast_agent.core.logging.logger import get_logger
 from fast_agent.mcp.events_extension import (
     EventDescriptor,
-    EventFrameHandler,
     ListEventsRequest,
     ListEventsRequestParams,
     ListEventsResult,
@@ -46,7 +45,7 @@ from fast_agent.mcp.events_extension import (
     StreamEventsRequestParams,
     StreamEventsResult,
 )
-from fast_agent.mcp.events_stream import EventStreamRouter
+from fast_agent.mcp.events_stream import EventStream, EventStreamRouter
 from fast_agent.mcp.skills_extension import (
     GetSkillRequest,
     GetSkillRequestParams,
@@ -371,19 +370,18 @@ class MCPClientConnection:
         )
         return await self._request(self.client.session.send_request(request, PollEventsResult))
 
-    async def stream_events(
+    async def open_event_stream(
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
         *,
         cursor: str | None = None,
         max_age_ms: int | None = None,
-        on_frame: EventFrameHandler,
-    ) -> StreamEventsResult:
-        """Hold one push subscription open under the MCP Events extension.
+    ) -> EventStream:
+        """Open one push subscription under the MCP Events extension.
 
-        ``on_frame`` receives each message on the stream. Returns when the
-        server closes the stream. Cancel the call to end the subscription.
+        Returns once the server confirms the stream. Close it to end the
+        subscription.
         """
         request = StreamEventsRequest(
             params=StreamEventsRequestParams(
@@ -394,14 +392,13 @@ class MCPClientConnection:
             )
         )
         session = self.client.session
-        return await self._event_streams.run(
+        return await self._event_streams.open(
             # The heartbeat is the liveness signal, so the read timeout does not apply.
             lambda: self._request(
                 session.send_request(
                     request, StreamEventsResult, request_read_timeout_seconds=math.inf
                 )
-            ),
-            on_frame,
+            )
         )
 
     async def _request(self, operation: Awaitable[T]) -> T:

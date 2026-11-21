@@ -51,15 +51,15 @@ A push subscription holds one `events/stream` request open, and the server
 sends events on it as they occur. The server also sends a heartbeat when it has
 nothing else to send. When no message arrives for three heartbeat intervals, or
 the stream drops or the server closes it, `fast-agent` opens a new stream from
-the last cursor after one to two seconds. Repeated failures double that wait, up
-to five minutes.
+the last cursor after one to two seconds.
 
 A poll subscription runs one poll loop. It follows the server's `nextPollMs`
 with a floor of one second and polls again at once while the server reports
-`hasMore`. A failed poll is retried with a doubling delay of up to five minutes,
-from the same cursor.
+`hasMore`.
 
-`/events poll <id>` ends the wait before the next poll or reconnect. When a poll
+A poll that fails, or a stream that cannot be opened, is retried with a doubling
+delay of up to five minutes, from the same cursor. `/events poll <id>` ends that
+wait. When a poll
 or a stream is rejected with a header mismatch, the event types are listed again
 and the request is tried once more from the same cursor. A second mismatch ends
 the subscription.

@@ -73,12 +73,11 @@ from fast_agent.mcp.common import (
     is_namespaced_name,
 )
 from fast_agent.mcp.events_extension import (
-    EventFrameHandler,
     ListEventsResult,
     PollEventsResult,
-    StreamEventsResult,
     server_supports_mcp_events,
 )
+from fast_agent.mcp.events_stream import EventStream
 from fast_agent.mcp.events_subscriptions import (
     EventInboxItem,
     EventSubscriptionManager,
@@ -4099,32 +4098,24 @@ class MCPAggregator(ContextDependent):
             method_args=method_args,
         )
 
-    async def stream_events(
+    async def open_event_stream(
         self,
         server_name: str,
         name: str,
         arguments: dict[str, Any] | None = None,
         *,
         cursor: str | None = None,
-        on_frame: EventFrameHandler,
-    ) -> StreamEventsResult:
-        """Hold one push subscription open on one server via SEP-3415.
-
-        Returns when the server closes the stream. Cancel the call to end it.
-        """
+    ) -> EventStream:
+        """Open one push subscription on one server via SEP-3415."""
         server_name = await self._require_events_server(server_name)
-        method_args: dict[str, Any] = {
-            "name": name,
-            "arguments": arguments or {},
-            "on_frame": on_frame,
-        }
+        method_args: dict[str, Any] = {"name": name, "arguments": arguments or {}}
         if cursor is not None:
             method_args["cursor"] = cursor
         return await self._execute_on_server(
             server_name=server_name,
             operation_type="events/stream",
             operation_name=name,
-            method_name="stream_events",
+            method_name="open_event_stream",
             method_args=method_args,
         )
 

@@ -6,7 +6,7 @@ Discovery, poll delivery and push delivery are modelled.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from mcp_types import (
@@ -181,7 +181,6 @@ type EventStreamFrame = (
     | EventStreamError
     | EventStreamTerminated
 )
-type EventFrameHandler = Callable[[EventStreamFrame], None]
 
 EVENT_STREAM_NOTIFICATIONS: dict[str, type[EventStreamFrame]] = {
     "notifications/events/active": EventStreamActive,

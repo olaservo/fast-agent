@@ -36,64 +36,88 @@ def _heartbeat(subscription_id: RequestId, cursor: str) -> EventStreamHeartbeat:
 @pytest.mark.asyncio
 async def test_streams_open_one_at_a_time_and_each_receives_its_own_messages() -> None:
     router = EventStreamRouter()
-    release = asyncio.Event()
+    server_closes = asyncio.Event()
     sent: list[str] = []
 
-    def request(label: str) -> Callable[[], Awaitable[str]]:
-        async def send() -> str:
+    def request(label: str) -> Callable[[], Awaitable[None]]:
+        async def send() -> None:
             sent.append(label)
-            await release.wait()
-            return label
+            await server_closes.wait()
 
         return send
 
-    first: list[EventStreamFrame] = []
-    second: list[EventStreamFrame] = []
-    one = asyncio.create_task(router.run(request("one"), first.append))
-    two = asyncio.create_task(router.run(request("two"), second.append))
+    opening_one = asyncio.create_task(router.open(request("one")))
+    opening_two = asyncio.create_task(router.open(request("two")))
     for _ in range(5):
         await asyncio.sleep(0)
-    # The second request waits until the first stream has named itself.
     assert sent == ["one"]
 
     await _notify(router, "active", _active(7))
+    one = await opening_one
     while sent != ["one", "two"]:
         await asyncio.sleep(0)
     await _notify(router, "active", _active("stream-8"))
+    two = await opening_two
 
     await _notify(router, "heartbeat", _heartbeat("7", "c1"))
     await _notify(router, "heartbeat", _heartbeat("stream-8", "c2"))
     await _notify(router, "heartbeat", _heartbeat(99, "c3"))
     await _notify(router, "heartbeat", EventStreamHeartbeat(cursor="c4"))
+    server_closes.set()
 
-    assert first == [_active(7), _heartbeat("7", "c1")]
-    assert second == [_active("stream-8"), _heartbeat("stream-8", "c2")]
-
-    release.set()
-    assert (await one, await two) == ("one", "two")
-    await _notify(router, "heartbeat", _heartbeat(7, "c5"))
-    assert len(first) == 2
+    assert [frame async for frame in one] == [_active(7), _heartbeat("7", "c1")]
+    assert [frame async for frame in two] == [_active("stream-8"), _heartbeat("stream-8", "c2")]
 
 
 @pytest.mark.asyncio
-async def test_an_unconfirmed_stream_times_out_and_a_rejected_one_raises() -> None:
+async def test_open_fails_when_the_server_is_silent_or_rejects_the_request() -> None:
     router = EventStreamRouter(open_timeout_seconds=0.01)
-    frames: list[EventStreamFrame] = []
     cancelled = asyncio.Event()
 
-    async def never_answers() -> None:
+    async def silent() -> None:
         try:
             await asyncio.Event().wait()
         finally:
             cancelled.set()
 
     with pytest.raises(TimeoutError):
-        await router.run(never_answers, frames.append)
+        await router.open(silent)
     assert cancelled.is_set()
 
     async def rejects() -> None:
         raise MCPError(-32602, "InvalidParams")
 
     with pytest.raises(MCPError):
-        await router.run(rejects, frames.append)
-    assert frames == []
+        await router.open(rejects)
+
+
+@pytest.mark.asyncio
+async def test_stream_raises_when_its_request_fails_and_closing_cancels_the_request() -> None:
+    router = EventStreamRouter()
+    connection_drops = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def drops() -> None:
+        await connection_drops.wait()
+        raise ConnectionError("gone")
+
+    async def held() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    opening = asyncio.create_task(router.open(drops))
+    await asyncio.sleep(0)
+    await _notify(router, "active", _active(1))
+    dropped = await opening
+    connection_drops.set()
+    assert await anext(dropped) == _active(1)
+    with pytest.raises(ConnectionError):
+        await anext(dropped)
+
+    opening = asyncio.create_task(router.open(held))
+    await asyncio.sleep(0)
+    await _notify(router, "active", _active(2))
+    await (await opening).aclose()
+    assert cancelled.is_set()
