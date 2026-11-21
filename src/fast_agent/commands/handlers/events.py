@@ -103,8 +103,8 @@ async def handle_events(
             _add_markdown(outcome, text, "events list")
         elif action == "subscribe" and len(rest) >= 2:
             wake = WAKE_FLAG in rest
-            requested = {DELIVERY_FLAGS[token] for token in rest if token in DELIVERY_FLAGS}
-            if len(requested) > 1:
+            modes = [DELIVERY_FLAGS[token] for token in rest[2:] if token in DELIVERY_FLAGS]
+            if len(modes) > 1:
                 raise ValueError("Use one of --poll and --push")
             arguments = [
                 token for token in rest[2:] if token != WAKE_FLAG and token not in DELIVERY_FLAGS
@@ -114,7 +114,7 @@ async def handle_events(
                 rest[1],
                 parse_event_arguments(arguments),
                 wake=wake,
-                delivery=requested.pop() if requested else None,
+                delivery=modes[0] if modes else None,
             )
             arrival = (
                 "Events start a turn when the prompt is idle."
@@ -130,7 +130,7 @@ async def handle_events(
         elif action == "poll" and len(rest) == 1:
             if not aggregator.events.poll_now(rest[0]):
                 raise ValueError(f"No active subscription with id '{rest[0]}'")
-            _add_markdown(outcome, _render_poll_now(aggregator, rest[0]), "events poll")
+            _add_markdown(outcome, f"Checking `{rest[0]}` now.", "events poll")
         elif action == "unsubscribe" and len(rest) == 1:
             _add_markdown(outcome, await _unsubscribe(aggregator, rest[0]), "events unsubscribe")
         else:
@@ -142,16 +142,6 @@ async def handle_events(
 
 def _add_markdown(outcome: CommandOutcome, text: str, right_info: str) -> None:
     outcome.add_message(text, right_info=right_info, render_markdown=True)
-
-
-def _render_poll_now(aggregator: _EventsAggregator, key: str) -> str:
-    deliveries = {
-        subscription.key: subscription.delivery
-        for subscription in aggregator.events.subscriptions()
-    }
-    if deliveries.get(key) == "push":
-        return f"`{key}` is delivered by push. Its stream reconnects now if it is down."
-    return f"Polling `{key}` now."
 
 
 def _render_status(aggregator: _EventsAggregator) -> str:
