@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from contextlib import AsyncExitStack, suppress
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mcp.client import CacheConfig, CacheMode, Client, Transport
-from mcp.client.extension import advertise
 from mcp.shared.exceptions import MCPError
 from mcp.shared.inbound import find_invalid_x_mcp_header
 from mcp_types import (
@@ -34,15 +34,19 @@ from mcp_types.version import LATEST_MODERN_VERSION, MODERN_PROTOCOL_VERSIONS
 from fast_agent.core.exceptions import ServerSessionTerminatedError
 from fast_agent.core.logging.logger import get_logger
 from fast_agent.mcp.events_extension import (
-    EVENTS_EXTENSION,
     EventDescriptor,
+    EventFrameHandler,
     ListEventsRequest,
     ListEventsRequestParams,
     ListEventsResult,
     PollEventsRequest,
     PollEventsRequestParams,
     PollEventsResult,
+    StreamEventsRequest,
+    StreamEventsRequestParams,
+    StreamEventsResult,
 )
+from fast_agent.mcp.events_stream import EventStreamRouter
 from fast_agent.mcp.skills_extension import (
     GetSkillRequest,
     GetSkillRequestParams,
@@ -122,6 +126,7 @@ class MCPClientConnection:
         protocol_mode: Literal["auto", "modern", "legacy"] = "auto",
     ) -> None:
         self.callbacks = callbacks
+        self._event_streams = EventStreamRouter()
         client_type = _ForcedModernClient if protocol_mode == "modern" else Client
         self.client = client_type(
             transport,
@@ -134,7 +139,7 @@ class MCPClientConnection:
             message_handler=callbacks.message_handler,
             client_info=callbacks.client_info,
             cache=CacheConfig() if cache else None,
-            extensions=[advertise(EVENTS_EXTENSION)],
+            extensions=[self._event_streams],
         )
 
     async def __aenter__(self) -> MCPClientConnection:
@@ -365,6 +370,39 @@ class MCPClientConnection:
             )
         )
         return await self._request(self.client.session.send_request(request, PollEventsResult))
+
+    async def stream_events(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        cursor: str | None = None,
+        max_age_ms: int | None = None,
+        on_frame: EventFrameHandler,
+    ) -> StreamEventsResult:
+        """Hold one push subscription open under the MCP Events extension.
+
+        ``on_frame`` receives each message on the stream. Returns when the
+        server closes the stream. Cancel the call to end the subscription.
+        """
+        request = StreamEventsRequest(
+            params=StreamEventsRequestParams(
+                name=name,
+                arguments=arguments or {},
+                cursor=cursor,
+                max_age_ms=max_age_ms,
+            )
+        )
+        session = self.client.session
+        return await self._event_streams.run(
+            # The heartbeat is the liveness signal, so the read timeout does not apply.
+            lambda: self._request(
+                session.send_request(
+                    request, StreamEventsResult, request_read_timeout_seconds=math.inf
+                )
+            ),
+            on_frame,
+        )
 
     async def _request(self, operation: Awaitable[T]) -> T:
         try:

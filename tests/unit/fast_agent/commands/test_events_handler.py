@@ -14,7 +14,9 @@ from fast_agent.commands.context import (
 from fast_agent.commands.handlers.events import handle_events, parse_event_arguments
 from fast_agent.mcp.events_extension import (
     EventDescriptor,
+    EventFrameHandler,
     EventOccurrence,
+    EventStreamActive,
     ListEventsResult,
     PollEventsResult,
 )
@@ -26,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class _Aggregator:
-    """Offer one poll event type on ``jobs`` and none on ``plain``."""
+    """Offer a poll, a push and a webhook event type on ``jobs`` and none on ``plain``."""
 
     def __init__(self) -> None:
         self.server_names = ["jobs", "plain"]
@@ -57,6 +59,7 @@ class _Aggregator:
                     },
                 ),
                 EventDescriptor(name="job.log_line", delivery=["push"]),
+                EventDescriptor(name="job.archived", delivery=["webhook"]),
             ]
         )
 
@@ -79,6 +82,19 @@ class _Aggregator:
         self.polls.append((server_name, name, arguments, cursor))
         events, self.next_events = self.next_events, []
         return PollEventsResult(events=events, cursor=f"c{len(self.polls)}")
+
+    async def stream_events(
+        self,
+        server_name: str,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        cursor: str | None = None,
+        on_frame: EventFrameHandler,
+    ) -> None:
+        del server_name, name, arguments, cursor
+        on_frame(EventStreamActive(cursor="s0"))
+        await asyncio.Event().wait()
 
 
 class _Agent:
@@ -153,8 +169,8 @@ async def test_events_list_shows_offered_types_and_arguments() -> None:
     assert "plain" not in text
     assert "`job.status_changed` (poll): Fires when a job changes stage" in text
     assert "arguments: `job_id` (required), `verbose`" in text
-    assert "`job.log_line` (push)" in text
-    assert "Not subscribable here" in text
+    assert "`job.log_line` (push)\n" in text
+    assert "`job.archived` (webhook) Not subscribable here" in text
 
     outcome = await handle_events(context, agent_name="main", argument="list plain")
     assert outcome.messages[0].channel == "error"
@@ -237,13 +253,38 @@ async def test_events_subscribe_with_wake_and_poll() -> None:
 
 
 @pytest.mark.asyncio
+async def test_events_subscribe_by_push() -> None:
+    agent = _Agent()
+    context = _context(agent)
+    manager = agent.aggregator.events
+
+    subscribed = _text(
+        await handle_events(context, agent_name="main", argument="subscribe jobs job.log_line")
+    )
+    assert "by push" in subscribed
+    [subscription] = manager.subscriptions()
+    assert subscription.delivery == "push"
+    assert agent.aggregator.polls == []
+    assert "| push | no | active |" in _text(await handle_events(context, agent_name="main"))
+
+    polled = _text(
+        await handle_events(context, agent_name="main", argument=f"poll {subscription.key}")
+    )
+    assert "delivered by push" in polled
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
 async def test_events_subscribe_reports_rejections_and_bad_usage() -> None:
     agent = _Agent()
     context = _context(agent)
 
     for argument, expected in [
         ("subscribe jobs job.deleted", "does not offer event"),
-        ("subscribe jobs job.log_line", "does not support poll delivery"),
+        ("subscribe jobs job.log_line --poll", "does not support poll delivery"),
+        ("subscribe jobs job.status_changed job_id=abc --push", "does not support push delivery"),
+        ("subscribe jobs job.status_changed job_id=abc --poll --push", "Use one of"),
+        ("subscribe jobs job.archived", "supports neither push nor poll delivery"),
         ("subscribe jobs job.status_changed", "job_id is required"),
         ("subscribe jobs job.status_changed job_id", "Expected key=value"),
         ("subscribe jobs", "Usage: /events"),
