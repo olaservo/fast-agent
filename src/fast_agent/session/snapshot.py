@@ -176,6 +176,7 @@ class SessionEventSubscriptionSnapshot(BaseModel):
     min_poll_ms: int | None = None
     origin: Literal["user", "declared", "model"] = "user"
     cursor: str | None = None
+    delivery: Literal["poll", "push"] | None = None
 
 
 class SessionAgentSnapshot(BaseModel):
@@ -1361,6 +1362,7 @@ def _capture_event_subscriptions(
                 min_poll_ms=subscription.min_poll_ms,
                 origin=subscription.origin,
                 cursor=subscription.consumed_cursor,
+                delivery=subscription.delivery,
             )
         )
     return snapshots
