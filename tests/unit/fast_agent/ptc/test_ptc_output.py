@@ -136,7 +136,9 @@ def test_guidance_only_adds_its_note(
 ) -> None:
     tools = _shell(tmp_path, profile).tools
     runtime = ProgrammaticToolRuntime(ProgrammaticToolCallingSettings())
-    off = _description(runtime, tools, tool_format=tool_format, output_guidance="off")
+    off = _description(
+        runtime, tools, tool_format=tool_format, output_guidance="off", result_byte_limit=33_000
+    )
     on = _description(
         runtime, tools, tool_format=tool_format, output_guidance=guidance, result_byte_limit=33_000
     )
@@ -246,6 +248,29 @@ async def helpers(tmp_path: Path) -> AsyncIterator[ProgrammaticToolRuntime]:
                 "exit_code=1 status=failed process_id=p1\n--- stderr\nwarn\nbad\n--- stdout\n"
                 "a\n[... 1 of 3 lines omitted; print the stream or use head()/grep() to see them ...]\nc"
             ),
+        ),
+        (
+            (
+                "show({'stdout': 'a\\nb\\nc\\n', 'stderr': 'warn\\n', "
+                "'exit_code': 1, 'status': 'failed'}, n=0)"
+            ),
+            (
+                "exit_code=1 status=failed\n--- stderr\n"
+                "[... 1 of 1 lines omitted; print the stream or use head()/grep() to see them ...]\n"
+                "--- stdout\n"
+                "[... 3 of 3 lines omitted; print the stream or use head()/grep() to see them ...]"
+            ),
+        ),
+        (
+            "show({'stdout': 'a\\nb\\nc\\n', 'exit_code': 0, 'status': 'completed'}, n=-2)",
+            (
+                "exit_code=0 status=completed\n--- stdout\n"
+                "[... 3 of 3 lines omitted; print the stream or use head()/grep() to see them ...]"
+            ),
+        ),
+        (
+            "show({'stdout': '', 'exit_code': 0, 'status': 'completed'}, n=0)",
+            "exit_code=0 status=completed\n--- stdout\n",
         ),
         (
             (
@@ -519,7 +544,8 @@ async def test_ptc_description_reflects_active_ptc_output_cap(
         tools = (await agent.list_tools()).tools
         description = next(tool for tool in tools if tool.name == PTC_TOOL_NAME).description or ""
         assert expected_label in description
-        assert "about 16 KB" not in description
+        if ptc_limit is not None:
+            assert "about 16 KB" not in description
     finally:
         await agent.shutdown()
 
@@ -529,13 +555,13 @@ async def test_ptc_exec_sandbox_uses_ptc_cap_while_non_ptc_keeps_16kb() -> None:
     payload_30k = "x" * 30_000
     payload_55k = "y" * 55_000
 
-    # 1. Default PTC agent: 30 KB passes through untouched; 55 KB is truncated at 48 KB.
+    # 1. PTC agent with explicit 48 KB cap: 30 KB passes through untouched; 55 KB is truncated at 48 KB.
     ptc_agent = McpAgent(
         AgentConfig(name="ptc-cap-run", servers=[], shell=True),
         context=Context(
             config=Settings(
                 default_model="gpt-6-astra",
-                ptc=ProgrammaticToolCallingSettings(enabled=True),
+                ptc=ProgrammaticToolCallingSettings(enabled=True, output_byte_limit=48_000),
                 shell_execution=ShellSettings(
                     show_bash=False,
                     output_byte_limit=DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,

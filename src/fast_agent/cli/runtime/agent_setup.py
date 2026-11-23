@@ -938,6 +938,32 @@ def _transient_result_messages_if_needed(
 
 
 async def _select_startup_model_if_needed(request: AgentRunRequest) -> str | None:
+    if request.force_model_picker:
+        settings = _load_request_settings(request)
+        can_prompt_for_model = _should_prompt_for_model_picker(
+            request,
+            stdin_is_tty=sys.stdin.isatty(),
+            stdout_is_tty=sys.stdout.isatty(),
+        )
+        if not can_prompt_for_model:
+            raise AgentConfigError(
+                "Interactive model picker requires a terminal.",
+                "Pass an explicit model with --model <model> when running non-interactively.",
+            )
+        initial_selection = _resolve_model_picker_initial_selection(settings=settings)
+        request.model = await _select_model_from_picker(
+            request,
+            config_payload=settings.model_dump(),
+            initial_provider=initial_selection.provider,
+            initial_model_spec=initial_selection.model_spec,
+        )
+        _persist_model_picker_last_used_selection(
+            request,
+            settings=settings,
+            model_spec=request.model,
+        )
+        return "model picker"
+
     if request.model is not None:
         return None
 
@@ -1105,8 +1131,10 @@ async def _apply_runtime_context_overrides(fast: Any, request: AgentRunRequest) 
         or request.shell_runtime
         or request.no_shell
         or request.prefer_local_shell
+        or request.acp_client_tools is not None
         or request.ptc is not None
         or request.ptc_search is not None
+        or request.ptc_search_forced
     ):
         return
 
@@ -1121,10 +1149,14 @@ async def _apply_runtime_context_overrides(fast: Any, request: AgentRunRequest) 
         context.no_shell = True
     if request.prefer_local_shell and config is not None:
         config.shell_execution.prefer_local_shell = True
+    if request.acp_client_tools is not None and config is not None:
+        config.acp.use_client_tools = request.acp_client_tools
     if request.ptc is not None:
         context.ptc_enabled = request.ptc
     if request.ptc_search is not None:
         context.ptc_search = request.ptc_search
+    if request.ptc_search_forced:
+        context.ptc_search_forced = True
 
 
 async def _add_cli_servers(fast: Any, request: AgentRunRequest) -> None:
@@ -1509,6 +1541,7 @@ async def _run_initialized_agent_request(
             port=request.port,
             instance_scope=request.instance_scope,
             permissions_enabled=serve_permissions_enabled,
+            use_client_tools=request.acp_client_tools,
             managed_mcp_agent_names=request.managed_mcp_agent_names,
         )
     else:

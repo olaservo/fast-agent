@@ -108,7 +108,7 @@ class CommonAgentOptions:
             None,
             "--model",
             "--models",
-            help="Select a model for this run (e.g., haiku, sonnet, gpt-4)",
+            help="Select a model for this run (e.g., haiku, sonnet, gpt-4). Omit value on 'go' to open the model picker.",
         )
 
     @staticmethod
@@ -236,6 +236,14 @@ class CommonAgentOptions:
             False,
             "--ptc-all",
             help="Enable programmatic tool calling with all function stubs upfront (disables tool search).",
+        )
+
+    @staticmethod
+    def ptc_search():
+        return typer.Option(
+            False,
+            "--ptc-search",
+            help="Enable programmatic tool calling and always defer extra functions behind tool search.",
         )
 
     @staticmethod

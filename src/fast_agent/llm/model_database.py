@@ -1391,6 +1391,20 @@ class ModelDatabase:
         fast=True,
     )
 
+    HY4_HF = ModelParameters(
+        ptc_enabled=True,
+        context_window=1_048_576,
+        max_output_tokens=65536,
+        tokenizes=OPENAI_VISION,
+        json_mode="schema",
+        reasoning="reasoning_content",
+        reasoning_effort_spec=HY4_FLASH_REASONING_EFFORT_SPEC,
+        stream_mode="manual",
+        default_provider=Provider.HUGGINGFACE,
+    )
+
+    HY4_FLASH_HF = HY4_HF.model_copy(update={"fast": True})
+
     MINIMAX_21 = ModelParameters(
         context_window=202752,
         max_output_tokens=131072,
@@ -1678,6 +1692,8 @@ class ModelDatabase:
         "glm-5.3-flash": GLM_5_3_FLASH,
         # Tencent Eval models
         "hy4-flash-dev": HY4_FLASH_DEV,
+        "tencent/hy4": HY4_HF,
+        "tencent/hy4-flash": HY4_FLASH_HF,
         # Google Gemini Models (vanilla aliases and versioned)
         "gemini-4-argon": GEMINI_4_STANDARD,
         "gemini-4-hydrogen": _with_fast(GEMINI_4_HYDROGEN),
@@ -1715,6 +1731,7 @@ class ModelDatabase:
         "meta-models/muse-glimmer-30b": MUSE_GLIMMER_HF,
         "reflection/beam-1.0-501b-a23b": BEAM_1_HF,
         "thinkingmachines/inkling-2-small": INKLING_2_SMALL_HF,
+        "thinkingmachines/inkling-2-mini": INKLING_2_SMALL_HF,
         "kimi-k3": KIMI_K3,
         "kimi-k3.1-pro": KIMI_K31,
         "qwen/qwen3-32b": QWEN3_REASONER,
@@ -1748,6 +1765,7 @@ class ModelDatabase:
         "qwen/qwen3.6-27b": GROQ_QWEN36_27B,
         "qwen/qwen3.8-27b": HF_PROVIDER_QWEN38,
         "google/gemma-4-31b-it": HF_PROVIDER_GEMMA4_31B,
+        "google/gemma-4-26b-a4b-it": HF_PROVIDER_GEMMA4_31B,
         "deepseek-ai/deepseek-v3.1": HF_PROVIDER_DEEPSEEK31,
         "deepseek-ai/deepseek-v3.2": HF_PROVIDER_DEEPSEEK32,
         "deepseek-ai/deepseek-v4-pro": HF_PROVIDER_DEEPSEEK4_PRO,
@@ -1836,9 +1854,14 @@ class ModelDatabase:
             "deepseek-ai/DeepSeek-V4.1-Flash-1017"
         ),
         (Provider.HUGGINGFACE, "qwen/qwen3.8-27b"): "Qwen/Qwen3.8-27B",
+        (Provider.HUGGINGFACE, "thinkingmachines/inkling-2-mini"): (
+            "thinkingmachines/Inkling-2-Mini"
+        ),
         (Provider.HUGGINGFACE, "thinkingmachines/inkling-2-small"): (
             "thinkingmachines/Inkling-2-Small"
         ),
+        (Provider.HUGGINGFACE, "tencent/hy4"): "tencent/Hy4",
+        (Provider.HUGGINGFACE, "tencent/hy4-flash"): "tencent/Hy4-flash",
     }
 
     @classmethod
@@ -1870,6 +1893,23 @@ class ModelDatabase:
         if params is not None:
             return params
         return cls._RUNTIME_MODEL_PARAMS.get(normalized)
+
+    @classmethod
+    def get_static_model_params(
+        cls,
+        model_key: str,
+        *,
+        provider: Provider | None = None,
+    ) -> ModelParameters | None:
+        """Look up static ModelDatabase parameters without invoking ModelFactory or overlays."""
+        normalized = strip_casefold(model_key)
+        if not normalized or normalized in cls.REMOVED_MODEL_NAMES:
+            return None
+        if provider is not None:
+            provider_override = cls._PROVIDER_MODEL_OVERRIDES.get((provider, normalized))
+            if provider_override is not None:
+                return provider_override
+        return cls.MODELS.get(normalized)
 
     @classmethod
     def get_request_model_params(
@@ -2533,8 +2573,10 @@ def _copilot_route_overrides(spec: CopilotModelSpec) -> dict[str, object]:
         # Copilot /models, 2026-11-17: Gemini uses an OpenAI-compatible gateway,
         # not native Google's thinking, grounding, service tiers or media APIs.
         efforts: list[ReasoningEffortLevel] = ["low", "medium", "high"]
+        default_effort: ReasoningEffortLevel = "medium"
         if spec.model_id in ("gemini-4-hydrogen", "gemini-4-neon"):
             efforts.append("xhigh")
+            default_effort = "high"
         # Copilot's Gemini gateway pricing and prompt reliability degrade past 200k
         # input tokens (the catalog's default context tier), so auto-compact at 190k
         # unless compact_at or compaction.threshold overrides it.
@@ -2543,7 +2585,11 @@ def _copilot_route_overrides(spec: CopilotModelSpec) -> dict[str, object]:
             max_output_tokens=64_000 if spec.model_id == "gemini-4-carbon" else 65_536,
             compaction_trigger_tokens=190_000,
             reasoning="openai",
-            reasoning_effort_spec=ReasoningEffortSpec(kind="effort", allowed_efforts=efforts),
+            reasoning_effort_spec=ReasoningEffortSpec(
+                kind="effort",
+                allowed_efforts=efforts,
+                default=ReasoningEffortSetting(kind="effort", value=default_effort),
+            ),
             google_service_tiers=(),
             google_search_supported=False,
             model_specific=None,

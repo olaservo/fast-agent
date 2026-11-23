@@ -38,7 +38,8 @@ if TYPE_CHECKING:
     from fast_agent.agents.workflow.parallel_agent import ParallelAgent
     from fast_agent.cli.runtime.shell_cwd_policy import MissingShellCwdPolicy
     from fast_agent.command_actions import PluginCommandActionSpec
-    from fast_agent.config import MCPServerSettings
+    from fast_agent.config import MCPServerSettings, TerminalImageSettings
+    from fast_agent.context import Context
     from fast_agent.core.harness import HarnessSession
     from fast_agent.interfaces import AgentProtocol
     from fast_agent.llm.usage_tracking import TurnUsage, UsageAccumulator
@@ -108,6 +109,12 @@ def _format_interactive_final_error(error: Exception) -> str:
         f"Error details: {clean_detail}\n"
         f"\n*Your context is preserved. You can try sending the message again.*"
     )
+
+
+@runtime_checkable
+class _ContextBearing(Protocol):
+    @property
+    def context(self) -> "Context | None": ...
 
 
 class AgentApp:
@@ -750,6 +757,16 @@ class AgentApp:
 
         prompt = InteractivePrompt(agent_types=agent_types)
 
+        def current_session_id() -> str | None:
+            if session_manager is not None and session_manager.current_session is not None:
+                return session_manager.current_session.info.name
+            if harness_session is not None:
+                harness_manager = harness_session.session_manager
+                if harness_manager is not None and harness_manager.current_session is not None:
+                    return harness_manager.current_session.info.name
+                return harness_session.id or None
+            return None
+
         async def send_with_error_handling(message, agent_name, *, show_usage: bool) -> str:
             if harness_session is not None:
                 try:
@@ -763,7 +780,9 @@ class AgentApp:
                         self.complete_user_turn(agent_name, turn_start_indices)
                     if show_usage and display_usage_enabled():
                         self._show_turn_usage(agent_name, turn_start_indices)
-                        await self._show_plugin_post_user_turn(agent_name, turn_start_indices)
+                        await self._show_plugin_post_user_turn(
+                            agent_name, turn_start_indices, session_id=current_session_id()
+                        )
                     return result
                 except Exception as e:
                     if isinstance(e, (KeyboardInterrupt, AgentConfigError, ServerConfigError)):
@@ -782,6 +801,7 @@ class AgentApp:
                 agent_name,
                 request_params=request_params,
                 show_usage=show_usage,
+                session_manager=session_manager,
             )
 
         async def send_wrapper(message, agent_name) -> str:
@@ -817,6 +837,8 @@ class AgentApp:
         *,
         request_params: RequestParams | None,
         show_usage: bool,
+        session_id: str | None = None,
+        session_manager: "SessionManager | None" = None,
     ) -> str:
         try:
             # The LLM layer will handle the 10s/20s/30s retries internally.
@@ -825,8 +847,17 @@ class AgentApp:
             if show_usage:
                 self.complete_user_turn(agent_name, turn_start_indices)
             if show_usage and display_usage_enabled():
+                resolved_session_id = session_id
+                if (
+                    resolved_session_id is None
+                    and session_manager is not None
+                    and session_manager.current_session is not None
+                ):
+                    resolved_session_id = session_manager.current_session.info.name
                 self._show_turn_usage(agent_name, turn_start_indices)
-                await self._show_plugin_post_user_turn(agent_name, turn_start_indices)
+                await self._show_plugin_post_user_turn(
+                    agent_name, turn_start_indices, session_id=resolved_session_id
+                )
             return result
         except Exception as e:
             # If we catch an exception here, it means all retries failed.
@@ -860,6 +891,8 @@ class AgentApp:
         self,
         agent_name: str | None,
         turn_start_indices: Mapping[str, int],
+        *,
+        session_id: str | None = None,
     ) -> None:
         if agent_name is None or not self._plugin_post_user_turn:
             return
@@ -870,9 +903,13 @@ class AgentApp:
         from fast_agent.integrations.herdr_lifecycle import report_session_usage
         from fast_agent.plugins.post_user_turn import run_plugin_post_user_turn
         from fast_agent.types.conversation_summary import split_into_turns
-        from fast_agent.ui.turn_usage_display import display_plugin_post_user_turn
+        from fast_agent.ui.turn_usage_display import (
+            display_plugin_post_user_turn,
+            display_plugin_post_user_turn_images,
+        )
 
         turn_usage, session_usage = self._collect_plugin_usage(agent, turn_start_indices)
+        terminal_image_settings = self._configured_terminal_images(agent)
         # The last turn, not a start offset: poll folding rewrites history mid-turn.
         turns = split_into_turns(agent.message_history)
         await run_plugin_post_user_turn(
@@ -883,7 +920,12 @@ class AgentApp:
             config=self._plugin_config,
             display=display_plugin_post_user_turn,
             report_session_usage=report_session_usage,
+            display_images=lambda images: display_plugin_post_user_turn_images(
+                images,
+                settings=terminal_image_settings,
+            ),
             turn_messages=tuple(turns[-1]) if turns else (),
+            session_id=session_id,
         )
 
     @staticmethod
@@ -1184,6 +1226,15 @@ class AgentApp:
         ttl_minutes = 60 if cache_ttl == "1h" else 5
         expiry = last_cache_activity + (ttl_minutes * 60)
         return CacheTTLExpiry(expires_at=expiry) if expiry > time.time() else None
+
+    @staticmethod
+    def _configured_terminal_images(agent: AgentProtocol) -> TerminalImageSettings:
+        from fast_agent.config import get_settings
+
+        context = agent.context if isinstance(agent, _ContextBearing) else None
+        if context is not None and context.config is not None:
+            return context.config.logger.terminal_images
+        return get_settings().logger.terminal_images
 
     @staticmethod
     def _configured_cache_ttl(agent) -> str | None:
