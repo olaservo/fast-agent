@@ -15,12 +15,14 @@ from fast_agent.constants import (
     DEFAULT_HIGH_REASONING_STREAMING_TIMEOUT,
     REASONING,
 )
+from fast_agent.event_progress import ProgressAction
+from fast_agent.llm.prompt_cache import copilot_gemini_observed_cache_ttl
 from fast_agent.llm.provider.copilot import broker
 from fast_agent.llm.provider.copilot.models import CopilotModelSpec, get_copilot_model
 from fast_agent.llm.provider.copilot.openai_client import create_openai_client
 from fast_agent.llm.provider.copilot.policy import apply_policy, reject_files, reject_overrides
 from fast_agent.llm.provider.openai.llm_openai import EmptyStreamError, OpenAILLM
-from fast_agent.llm.provider.openai.request_images import ChatRequestImageFitter, ImageBudget
+from fast_agent.llm.provider.request_images import ChatRequestImageFitter, ImageBudget
 from fast_agent.llm.provider.streaming_timeouts import StreamIdleTimeoutError
 from fast_agent.llm.provider_types import Provider
 from fast_agent.mcp.helpers.content_helpers import get_text
@@ -82,6 +84,10 @@ class CopilotChatCompletionsLLM(OpenAILLM):
         ):
             raise ValueError("Copilot Chat Completions requires a Chat Completions model.")
 
+    def clear(self, *, clear_prompts: bool = False) -> None:
+        super().clear(clear_prompts=clear_prompts)
+        self._image_fitter.reset_watermark()
+
     def _openai_reasoning_settings(self) -> None:
         return None
 
@@ -118,6 +124,11 @@ class CopilotChatCompletionsLLM(OpenAILLM):
 
     def supports_files_api(self) -> bool:
         return False
+
+    @property
+    def cache_retention_seconds(self) -> int | None:
+        model = self.default_request_params.model
+        return copilot_gemini_observed_cache_ttl(model) if model else None
 
     def _fallback_to_non_streaming_on_empty_stream(self, model: str) -> bool:
         # Copilot Gemini serves empty completions identically on non-streaming after a long
@@ -362,12 +373,11 @@ class CopilotChatCompletionsLLM(OpenAILLM):
             fitted_request
         )
         recovered_request.arguments = apply_policy(
-            recovered_request.arguments, spec, endpoint.headers
+            recovered_request.arguments,
+            spec,
+            endpoint.headers,
+            agent_initiated=preserve_agent_initiator or self.verb == ProgressAction.WARMING_CACHE,
         )
-        if preserve_agent_initiator:
-            extra_headers = dict(recovered_request.arguments.get("extra_headers") or {})
-            extra_headers["x-initiator"] = "agent"
-            recovered_request.arguments["extra_headers"] = extra_headers
         state = self._copilot_recovery_state.get()
         try:
             return await super()._run_openai_completion_request(recovered_request)
