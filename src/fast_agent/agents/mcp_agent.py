@@ -142,6 +142,11 @@ from fast_agent.tools.elicitation import (
     run_elicitation_form,
     set_elicitation_input_callback,
 )
+from fast_agent.tools.events_tool import (
+    EVENTS_TOOL_NAME,
+    build_events_tool,
+    execute_events_tool,
+)
 from fast_agent.tools.file_read_access import (
     SKILL_READER_FILE_READS,
     TOOL_FILE_READS,
@@ -352,10 +357,7 @@ class McpAgent(ABC, ToolAgent):
         manifests = self._initial_skill_manifests(context)
 
         self._initialize_runtime_slots(context)
-        self._skill_manifests: list[SkillManifest] = []
-        self._skill_map: dict[str, SkillManifest] = {}
-        self._skill_reader: SkillReader | None = None
-        self.set_skill_manifests(manifests)
+        self._update_skill_data(manifests)
         self.skill_registry = self._resolve_skill_registry(context)
         self._warnings: list[str] = []
         self._warning_messages_seen: set[str] = set()
@@ -640,6 +642,13 @@ class McpAgent(ABC, ToolAgent):
         """Return currently active MCP event subscriptions with ``wake=True``."""
         return self._aggregator.active_wake_subscriptions()
 
+    def event_wait_state(self) -> tuple[list[EventSubscription], bool]:
+        """Return ``(active_wake_subscriptions, wake_paused)`` for this agent."""
+        return (
+            self._aggregator.active_wake_subscriptions(),
+            self._aggregator.event_wake_paused,
+        )
+
     def record_event_wake_turn(self) -> None:
         """Record one consecutive event wake turn."""
         self._aggregator.record_event_wake_turn()
@@ -647,6 +656,10 @@ class McpAgent(ABC, ToolAgent):
     def reset_event_wake_budget(self) -> None:
         """Reset the consecutive event wake turn budget after a human-typed turn."""
         self._aggregator.reset_event_wake_budget()
+
+    async def reset_events(self) -> None:
+        """Reset session-scoped event subscriptions, inbox, wake budget, and toolbar notices."""
+        await self._aggregator.reset_events()
 
     async def get_server_status(self) -> dict[str, ServerStatus]:
         """Expose server status details for UI and diagnostics consumers."""
@@ -1004,13 +1017,14 @@ class McpAgent(ABC, ToolAgent):
             )
 
     def set_skill_manifests(self, manifests: Sequence[SkillManifest]) -> None:
+        self._update_skill_data(manifests)
+        if self._skill_manifests:
+            self._ensure_shell_runtime_for_skills()
+
+    def _update_skill_data(self, manifests: Sequence[SkillManifest]) -> None:
         self._skill_manifests = list(manifests)
         self._skill_map = {manifest.name: manifest for manifest in self._skill_manifests}
-        if self._skill_manifests:
-            self._skill_reader = SkillReader(self._skill_manifests, self.logger)
-            self._ensure_shell_runtime_for_skills()
-        else:
-            self._skill_reader = None
+        self._skill_reader = SkillReader(self._skill_manifests, self.logger) if manifests else None
 
     def _ensure_shell_runtime_for_skills(self) -> None:
         if self._no_shell_requested:
@@ -2415,6 +2429,12 @@ class McpAgent(ABC, ToolAgent):
                 tool_handler=self.tool_handler_for(request_params),
             )
 
+        if name == EVENTS_TOOL_NAME:
+            if self._events_runtime_tool() is not None and (
+                builtin_only or name not in self._execution_tools
+            ):
+                return await execute_events_tool(self._aggregator, arguments)
+
         if name == HUMAN_INPUT_TOOL_NAME:
             if builtin_only and self._human_input_runtime_tool() is None:
                 return None
@@ -2873,6 +2893,7 @@ class McpAgent(ABC, ToolAgent):
             or self._is_filesystem_runtime_tool(name)
             or (self._skill_reader is not None and name == READ_SKILL_TOOL_NAME)
             or (self._shell_runtime is not None and self._shell_runtime.owns_tool(name))
+            or (name == EVENTS_TOOL_NAME and self._events_runtime_tool() is not None)
             or name == HUMAN_INPUT_TOOL_NAME
             or name in self._execution_tools
         )
@@ -3605,6 +3626,7 @@ class McpAgent(ABC, ToolAgent):
                 merged_tools,
                 sources=self._ptc_function_sources(routes),
                 unavailable_sources=self._ptc_unavailable_sources(mcp_tools),
+                events_sources=self.events_capable_servers(),
                 routes=routes,
                 file_read=self._shell_runtime_enabled
                 or READ_TEXT_FILE_TOOL_NAME in filesystem_tools,
@@ -3769,6 +3791,9 @@ class McpAgent(ABC, ToolAgent):
         skill_tool = self._skill_reader_fallback_tool()
         if skill_tool is not None:
             tools.append(skill_tool)
+        events_tool = self._events_runtime_tool()
+        if events_tool is not None and all(tool.name != events_tool.name for tool in tools):
+            tools.append(events_tool)
         human_tool = self._human_input_runtime_tool()
         # ToolAgent may already install its own human input tool under the same name.
         if human_tool is not None and all(tool.name != human_tool.name for tool in tools):
@@ -3806,6 +3831,15 @@ class McpAgent(ABC, ToolAgent):
         ):
             return self._skill_reader.tool
         return None
+
+    def events_capable_servers(self) -> frozenset[str]:
+        """Return attached server display names that declared MCP Events support (cached only)."""
+        return self._aggregator.events_capable_servers()
+
+    def _events_runtime_tool(self) -> Tool | None:
+        if not self.events_capable_servers():
+            return None
+        return build_events_tool()
 
     def _human_input_runtime_tool(self) -> Tool | None:
         if not self.config.human_input:
