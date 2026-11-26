@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
+import sys
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +14,9 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.output.vt100 import Vt100_Output
+from prompt_toolkit.renderer import CPR_Support, Renderer
+from rich.file_proxy import FileProxy
 from rich.text import Text
 
 from fast_agent.command_actions.accessors import (
@@ -19,7 +25,7 @@ from fast_agent.command_actions.accessors import (
     plugin_commands_for_provider,
 )
 from fast_agent.core.logging.logger import get_logger
-from fast_agent.integrations.hc_children import is_hc_message
+from fast_agent.integrations.hc_children import hc_terminal_id, is_hc_message
 from fast_agent.ui.console import rich_print
 from fast_agent.ui.prompt.attachment_tokens import (
     append_attachment_tokens,
@@ -34,6 +40,7 @@ from fast_agent.ui.prompt.pasted_paths import (
     unsupported_image_paste_message,
 )
 from fast_agent.ui.prompt.turn_input import keep_draft_for_next_prompt
+from fast_agent.ui.terminal_streams import TtyCapableStream, is_tty_stream
 from fast_agent.utils.async_utils import run_in_thread
 
 if TYPE_CHECKING:
@@ -214,14 +221,41 @@ def _toggle_multiline_mode(
         on_toggle_multiline(session_state.in_multiline_mode)
 
 
+def reset_renderer_cpr_state(renderer: Renderer, *, reset_cpr_support: bool = False) -> None:
+    """Drain stale CPR futures left behind by terminal disconnects or resizes."""
+    waiting = renderer._waiting_for_cpr_futures
+    while waiting:
+        fut = waiting.popleft()
+        if not fut.done():
+            fut.set_result(None)
+    if reset_cpr_support and renderer.cpr_support == CPR_Support.NOT_SUPPORTED:
+        renderer.cpr_support = CPR_Support.UNKNOWN
+
+
 def _clear_terminal_screen(event: Any, fallback_app: Any | None) -> None:
     app_ref = _event_or_fallback_app(event, fallback_app)
     if not app_ref:
         return
-    renderer = getattr(app_ref, "renderer", None)
-    if renderer:
+    renderer = app_ref.renderer
+    reset_renderer_cpr_state(renderer)
+    output = renderer.output
+    if isinstance(output, Vt100_Output):
+        # Erase the active prompt first so it isn't pushed into scrollback,
+        # reset scroll region/SGR, then scroll the visible viewport into
+        # scrollback so the previous message isn't lost on erase_screen().
+        renderer.erase(leave_alternate_screen=False)
+        output.write_raw("\x1b[r\x1b[0m")
+        rows = output.get_size().rows
+        if rows > 0:
+            output.write_raw(f"\x1b[{rows};1H" + "\n" * rows)
+        output.erase_screen()
+        output.cursor_goto(0, 0)
+        output.flush()
+    else:
         renderer.clear()
-        app_ref.invalidate()
+    reset_renderer_cpr_state(renderer)
+    renderer._min_available_height = 0
+    app_ref.invalidate()
 
 
 async def _edit_current_buffer_in_editor(event: Any) -> None:
@@ -254,31 +288,66 @@ def _show_copy_notice(event: Any) -> None:
         rich_print("\n[green]✓ Copied to clipboard[/green]")
 
 
-def _copy_last_output(event: Any, kb: AgentKeyBindings) -> None:
-    session_state = _session_state_module()
+def _tty_clipboard_stream() -> TtyCapableStream | None:
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return None
+    stream: object = sys.stdout
+    while isinstance(stream, FileProxy):
+        stream = stream.rich_proxied_file
+    return stream if is_tty_stream(stream) else None
+
+
+def _write_osc52_clipboard(text: str) -> bool:
+    """Write text to the attached terminal client's clipboard via OSC 52."""
+    stream = _tty_clipboard_stream()
+    if stream is None:
+        return False
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    sequence = f"\x1b]52;c;{encoded}\x07"
+    if os.environ.get("TMUX"):
+        sequence = f"\x1bPtmux;\x1b{sequence}\x1b\\"
+    try:
+        stream.write(sequence)
+        stream.flush()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _copy_text_to_clipboard(text: str) -> bool:
+    osc_copied = _write_osc52_clipboard(text)
+    if osc_copied and (
+        hc_terminal_id() or os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")
+    ):
+        return True
+    try:
+        import pyperclip
+
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return osc_copied
+
+
+def _resolve_copyable_output(session_state: Any, kb: AgentKeyBindings) -> str | None:
     if session_state._last_copyable_output:
-        try:
-            import pyperclip
-
-            pyperclip.copy(session_state._last_copyable_output)
-            _show_copy_notice(event)
-            return
-        except Exception:
-            pass
-
+        return session_state._last_copyable_output
     if kb.agent_provider and kb.current_agent_name:
         try:
             agent = kb.agent_provider._agent(kb.current_agent_name)
             for msg in reversed(agent.message_history):
-                if msg.role == "assistant":
-                    content = msg.last_text()
-                    import pyperclip
-
-                    pyperclip.copy(content)
-                    _show_copy_notice(event)
-                    return
+                if msg.role == "assistant" and (content := msg.last_text()):
+                    return content
         except Exception:
-            pass
+            return None
+    return None
+
+
+def _copy_last_output(event: Any, kb: AgentKeyBindings) -> None:
+    session_state = _session_state_module()
+    content = _resolve_copyable_output(session_state, kb)
+    if content and _copy_text_to_clipboard(content):
+        _show_copy_notice(event)
 
 
 def _add_completion_keybindings(

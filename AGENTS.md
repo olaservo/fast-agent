@@ -1,10 +1,16 @@
 <!-- fast-agent-subagents -->
 
 
-Feel free to use herdr-core to delegate out task work. Good models for this are:
- - codexresponses.gpt-6.2-astra?reasoning=high ; strong openai model excellent for reviews and coordination and second opinions
+Good models for delegated work:
+ - codexresponses.gpt-6.2-astra?reasoning=high ; strong openai model excellent for reviews, coordination, and second opinions. It tends to overcomplicate and hunt contrived edge cases on repeat passes: constrain it to favor simplicity/no extra abstractions, take real correctness/parity catches, and push back when fixes add complexity for synthetic inputs.
  - codexresponses.gpt-6.2-sol?reasoning=high ; excellent and efficient execution and analysis
  - copilot.claude-opus-5.5?reasoning=high ; excellent implementor and designer
+
+Practical `hc` patterns:
+ - For non-trivial tasks, write a markdown brief (e.g. `/tmp/<slug>-brief.md`) naming the literal parent return address (`hc send <$HC_TERMINAL_ID>`) and verification steps. When parallel workers share a checkout, give each an explicit file allowlist and forbid `git commit`/`checkout`/`stash`/`reset`.
+ - Treat worker reports as claims to verify rather than finished truth: spot-check key diffs or outputs, act on caveats a worker flags, and follow up (or run a quick review pass) before building on or reporting their work.
+ - Reuse the same reviewer terminal across fix/re-review rounds to keep context and prompt cache warm (`gpt-6.2-*` holds cache ~30–50m idle between rounds; 5m-TTL `claude-*` reviewers expire between slow fix rounds unless `/warm` is armed for an active loop), then clean up accepted children immediately (`hc kill <name> && hc rm <name>`).
+ - `hc` CLI reminders: `hc wait` takes a single `<t>` or `--children all|any` and integer `--timeout <sec>` (no `s` suffix); multi-line `hc send` takes a positional string (`"$(cat <<'EOF' ... EOF)"`, no `--stdin`).
 
 ## fast-agent contributor notes
 
@@ -13,6 +19,7 @@ Feel free to use herdr-core to delegate out task work. Good models for this are:
   `uv run scripts/typecheck.py` after code changes. If the format check fails,
   run `uv run scripts/format.py` before rechecking.
 - Check the type safety rules in `typesafe.md` and avoid hasattr/getattr style checks
+- Check `update-exceptions.md` when upgrading third-party dependencies or adding library-internal workarounds, and keep it updated when private SDK hooks are added or removed.
 - Avoid unnecessary defensive programming. Validate at boundaries and use static analysis and type safety rules to write concise code. Do not caveat without good cause (external data processing for example).
 - Keep examples under `examples/` in sync with packaged resources when relevant.
 - Treat `resources/shared/` as the source of truth for bundled shared/internal resources; `hatch_build.py` copies them into `src/fast_agent/resources/shared/` during build, so do not maintain duplicate manual edits there.

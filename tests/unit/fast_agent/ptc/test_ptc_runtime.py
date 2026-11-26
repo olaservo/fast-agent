@@ -267,6 +267,18 @@ async def test_settle_gathers_every_result_and_survives_conversation_reset(runti
         assert _text(result).endswith('Result:\n["dict", "RuntimeError", "dict"]')
 
 
+@pytest.mark.asyncio
+async def test_prelude_preimports_os_and_pathlib(runtime) -> None:
+    """``os`` and ``pathlib`` are pre-imported so fresh runs can use them without importing."""
+    dispatch = RecordingDispatcher()
+    code = "[os.path.join('a', 'b'), str(pathlib.Path('a') / 'b')]"
+
+    result = await runtime.execute({"code": code}, dispatch)
+
+    assert not result.is_error, _text(result)
+    assert _text(result).endswith('Result:\n["a/b", "a/b"]')
+
+
 def test_cpython_guidance_is_removed_when_shell_tool_is_removed() -> None:
     """Refreshing the tool list must not retain guidance for an unavailable shell."""
     runtime = ProgrammaticToolRuntime(ProgrammaticToolCallingSettings(enabled=True))
@@ -1599,6 +1611,22 @@ async def test_syntax_errors_are_explained_with_a_nested_quote_hint(type_check) 
     assert "delimited with ''' instead" in text
     assert "unresolved-reference" not in text
     assert unsupported.is_error and "SyntaxError:" not in _text(unsupported)
+
+
+@pytest.mark.asyncio
+async def test_syntax_errors_explain_backtick_string_delimiters() -> None:
+    runtime = ProgrammaticToolRuntime(ProgrammaticToolCallingSettings(enabled=True))
+    runtime.model_tools(TOOLS)
+    dispatch = RecordingDispatcher()
+    try:
+        result = await runtime.execute({"code": "x = `hello`"}, dispatch)
+    finally:
+        await runtime.close()
+
+    text = _text(result)
+    assert result.is_error and not dispatch.calls
+    assert "SyntaxError:" in text
+    assert "backticks" in text
 
 
 def _listed_modules(instructions: str, start: str, end: str) -> list[str]:
