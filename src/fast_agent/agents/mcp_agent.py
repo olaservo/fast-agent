@@ -108,7 +108,7 @@ from fast_agent.mcp.tool_result_metadata import (
     ToolResultDisplayMetadata,
     tool_result_display_metadata,
 )
-from fast_agent.mcp.tool_result_spool import spool_tool_result
+from fast_agent.mcp.tool_result_spool import spool_tool_result, store_tool_result
 from fast_agent.mcp.tool_result_truncation import (
     bound_tool_result_for_llm,
     page_read_text_file_result,
@@ -151,6 +151,11 @@ from fast_agent.tools.file_read_access import (
 from fast_agent.tools.filesystem_tool_definitions import (
     READ_TEXT_FILE_TOOL_NAME,
     WRITE_TEXT_FILE_TOOL_NAME,
+)
+from fast_agent.tools.image_gen import (
+    ImageGenRuntime,
+    ResolvedImageGenModel,
+    resolve_image_gen_model,
 )
 from fast_agent.tools.skill_reader import READ_SKILL_TOOL_NAME, SkillReader
 from fast_agent.tools.tool_surface import ToolSurface
@@ -366,6 +371,7 @@ class McpAgent(ABC, ToolAgent):
         # set with the "attach" method
         self._llm: FastAgentLLMProtocol | None = None
         self._codex_web_search = CodexWebSearchAdapter(self)
+        self._image_gen_runtime: ImageGenRuntime | None = None
         self._ptc_runtime: ProgrammaticToolRuntime | None = None
         # Model-facing names whose tool dispatch must not resolve by name: aliases, and
         # an MCP tool's plain name while a local tool of the same name is present.
@@ -1320,6 +1326,7 @@ class McpAgent(ABC, ToolAgent):
         self, llm: FastAgentLLMProtocol, *, for_new_session: bool = False
     ) -> None:
         super()._validate_llm_attachment(llm, for_new_session=for_new_session)
+        self._resolve_image_gen_for_llm(llm)
         self._decide_ptc(llm, for_new_session=for_new_session)
         if self._provider_managed_mcp_state.has_servers():
             if (
@@ -1382,6 +1389,66 @@ class McpAgent(ABC, ToolAgent):
 
         self._ptc_decision = self._decide_ptc(llm)
         self._configure_tool_runtimes(llm)
+        self._configure_image_gen_runtime(llm)
+
+    def _current_llm_supports_vision(self) -> bool:
+        if self._llm is None or self._llm.model_info is None:
+            return True
+        return self._llm.model_info.supports_vision
+
+    def _resolve_image_gen_for_llm(self, llm: FastAgentLLMProtocol) -> ResolvedImageGenModel | None:
+        image_gen_cfg = self.config.image_gen
+        if not image_gen_cfg or self.config.tool_only or self.config.subagent_child:
+            return None
+        if self._shell_environment is not None:
+            from fast_agent.tools.local_shell_executor import LocalEnvironment
+
+            if not isinstance(self._shell_environment, LocalEnvironment):
+                raise AgentConfigError(
+                    "Built-in image generation is only supported in local environments."
+                )
+        spec = image_gen_cfg if isinstance(image_gen_cfg, str) else None
+        settings = self._context.config if self._context is not None else None
+        return resolve_image_gen_model(
+            spec,
+            settings=settings,
+            main_provider=llm.provider,
+        )
+
+    def _configure_image_gen_runtime(self, llm: FastAgentLLMProtocol) -> None:
+        resolved = self._resolve_image_gen_for_llm(llm)
+        if resolved is None:
+            self._image_gen_runtime = None
+            return
+        settings = self._context.config if self._context is not None else None
+        self._image_gen_runtime = ImageGenRuntime(
+            resolved,
+            settings=settings,
+            working_dir=self._image_gen_working_dir,
+            supports_vision=self._current_llm_supports_vision,
+            agent_name=self.name,
+        )
+        self.logger.info(f"Image generation: {resolved.spec}")
+
+    def _image_gen_working_dir(self) -> Path:
+        if self._shell_environment is not None:
+            from fast_agent.tools.local_shell_executor import LocalEnvironment
+
+            if isinstance(self._shell_environment, LocalEnvironment):
+                return self._shell_environment.working_directory()
+        if (
+            self._context is not None
+            and self._context.acp is not None
+            and self._context.acp.session_cwd
+        ):
+            return Path(self._context.acp.session_cwd).expanduser().resolve()
+        return (self.config.cwd or Path.cwd()).resolve()
+
+    @property
+    def image_gen_model(self) -> str | None:
+        return (
+            self._image_gen_runtime.resolved.spec if self._image_gen_runtime is not None else None
+        )
 
     def _configure_tool_runtimes(self, llm: FastAgentLLMProtocol) -> None:
         """Apply model- and PTC-dependent settings to the filesystem and shell runtimes."""
@@ -2323,6 +2390,14 @@ class McpAgent(ABC, ToolAgent):
                 defer_display_to_tool_result=self._defer_shell_display_to_tool_result,
             )
 
+        if self._image_gen_runtime and self._image_gen_runtime.owns_tool(name):
+            return await self._image_gen_runtime.call_tool(
+                name,
+                arguments,
+                tool_use_id=tool_use_id,
+                tool_handler=self.tool_handler_for(request_params),
+            )
+
         if name == HUMAN_INPUT_TOOL_NAME:
             if builtin_only and self._human_input_runtime_tool() is None:
                 return None
@@ -3036,13 +3111,29 @@ class McpAgent(ABC, ToolAgent):
         result: CallToolResult,
     ) -> str | None:
         store = self.transient_artifact_store()
-        if store is None:
+        if store is not None:
+            try:
+                return await spool_tool_result(store, result, tool_name=call.display_tool_name)
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to retain full tool result",
+                    data={"tool_name": call.display_tool_name, "error": str(exc)},
+                )
+                return None
+
+        ptc_runtime = self._programmatic_tool_runtime()
+        if ptc_runtime is None:
             return None
         try:
-            return await spool_tool_result(store, result, tool_name=call.display_tool_name)
+            return store_tool_result(
+                ptc_runtime.store,
+                result,
+                tool_name=call.display_tool_name,
+                ptc_tool_name=ptc_runtime.tool_name,
+            )
         except Exception as exc:
             self.logger.warning(
-                "Failed to retain full tool result",
+                "Failed to retain full tool result in PTC store",
                 data={"tool_name": call.display_tool_name, "error": str(exc)},
             )
             return None
@@ -3657,6 +3748,7 @@ class McpAgent(ABC, ToolAgent):
         tools = list((await super().list_tools()).tools)
         tools.extend(self._terminal_runtime_tools())
         tools.extend(self._filesystem_runtime_tools())
+        tools.extend(self._image_gen_runtime_tools())
         skill_tool = self._skill_reader_fallback_tool()
         if skill_tool is not None:
             tools.append(skill_tool)
@@ -3672,6 +3764,11 @@ class McpAgent(ABC, ToolAgent):
         if self._shell_runtime is not None:
             return self._shell_runtime.tools
         return []
+
+    def _image_gen_runtime_tools(self) -> list[Tool]:
+        if self._image_gen_runtime is None:
+            return []
+        return self._image_gen_runtime.tools
 
     def _filesystem_runtime_tools(self) -> list[Tool]:
         if not self._filesystem_runtime:
