@@ -65,7 +65,7 @@ _EVENTS_INPUT_SCHEMA: Final[dict[str, Any]] = {
         "once": {
             "type": "boolean",
             "default": False,
-            "description": "Stop polling automatically after the first event arrives.",
+            "description": "End the subscription automatically after the first event arrives.",
         },
         "every": {
             "type": "string",
