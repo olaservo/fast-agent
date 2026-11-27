@@ -30,10 +30,11 @@ logger = get_logger(__name__)
 
 EVENTS_USAGE = (
     "Usage: /events [select|list [server]|subscribe <server> <event> [key=value ...] "
-    "[--wake] [--once] [--every <duration>] [--poll|--push]|poll <id>|"
+    "[--no-wake] [--once] [--every <duration>] [--poll|--push]|poll <id>|"
     "unsubscribe <id>|unsubscribe all]"
 )
 WAKE_FLAG = "--wake"
+NO_WAKE_FLAG = "--no-wake"
 ONCE_FLAG = "--once"
 EVERY_FLAG = "--every"
 DELIVERY_FLAGS: dict[str, SubscriptionDelivery] = {"--poll": "poll", "--push": "push"}
@@ -42,7 +43,7 @@ DELIVERY_FLAGS: dict[str, SubscriptionDelivery] = {"--poll": "poll", "--push": "
 @dataclass(frozen=True, slots=True)
 class _SubscribeOptions:
     argument_tokens: list[str]
-    wake: bool = False
+    wake: bool = True
     once: bool = False
     min_poll_ms: int | None = None
     delivery: SubscriptionDelivery | None = None
@@ -50,7 +51,7 @@ class _SubscribeOptions:
 
 def _parse_subscribe_options(tokens: list[str]) -> _SubscribeOptions:
     argument_tokens: list[str] = []
-    wake = False
+    wake = True
     once = False
     min_poll_ms: int | None = None
     modes: list[SubscriptionDelivery] = []
@@ -59,6 +60,8 @@ def _parse_subscribe_options(tokens: list[str]) -> _SubscribeOptions:
         token = tokens[index]
         if token == WAKE_FLAG:
             wake = True
+        elif token == NO_WAKE_FLAG:
+            wake = False
         elif token == ONCE_FLAG:
             once = True
         elif token == EVERY_FLAG:
