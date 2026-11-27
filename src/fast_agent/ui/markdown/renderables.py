@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -20,7 +21,7 @@ from rich.markdown import (
 )
 from rich.markdown import CodeBlock as RichCodeBlock
 from rich.segment import Segment
-from rich.style import Style
+from rich.style import Style, StyleType
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -579,7 +580,31 @@ def syntax_theme_has_background(code_theme: str) -> bool:
     return theme.get_background_style().bgcolor is not None
 
 
-class CursorSyntax(Syntax):
+class _ReflowSafeSyntax(Syntax):
+    """Syntax renderable that emits unbroken logical lines when options.no_wrap is set."""
+
+    def _prepare_code(self) -> str:
+        processed = self.code if self.code.endswith("\n") else f"{self.code}\n"
+        if self.dedent:
+            processed = textwrap.dedent(processed)
+        return processed.expandtabs(self.tab_size)
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        if not options.no_wrap:
+            yield from super().__rich_console__(console, options)
+            return
+        highlighted = self.highlight(self._prepare_code())
+        if highlighted.plain.endswith("\n"):
+            highlighted.remove_suffix("\n")
+        for line in highlighted.split("\n", allow_blank=True):
+            yield from line.render(console, end="\n")
+
+
+class CursorSyntax(_ReflowSafeSyntax):
     """Append the stream cursor after lexing so it cannot become an error token."""
 
     def __init__(
@@ -658,8 +683,8 @@ class _ReflowSafeCodeBlock(RichCodeBlock):
         is_open = False
         cursor_suffix = ""
         if isinstance(markdown, _ReflowSafeMarkdown):
-            is_open = markdown._live_incomplete_fences and _token_is_open_fence(token)
-            if is_open and token is markdown._cursor_fence_token:
+            is_open = token is markdown._open_fence_token
+            if is_open:
                 cursor_suffix = markdown._cursor_suffix
         return cls(
             lexer_name,
@@ -686,7 +711,7 @@ class _ReflowSafeCodeBlock(RichCodeBlock):
                 cursor_suffix=self._cursor_suffix,
             )
             return
-        yield Syntax(
+        yield _ReflowSafeSyntax(
             code,
             normalized_language,
             theme=self.theme,
@@ -717,7 +742,7 @@ class _FramedMarkdownCodeBlock(_ReflowSafeCodeBlock):
                 cursor_suffix=self._cursor_suffix,
             )
             if self._cursor_suffix
-            else Syntax(
+            else _ReflowSafeSyntax(
                 code,
                 normalized_language,
                 theme=self.theme,
@@ -753,12 +778,28 @@ class _ReflowSafeHeading(Heading):
         yield text
 
 
+def _render_container_lines(
+    console: Console,
+    renderable: RenderableType,
+    render_options: ConsoleOptions,
+    *,
+    style: StyleType,
+) -> list[list[Segment]]:
+    resolved_style = console.get_style(style) if style else None
+    if render_options.no_wrap:
+        segments = console.render(renderable, render_options)
+        if resolved_style:
+            segments = Segment.apply_style(segments, resolved_style)
+        return list(Segment.split_lines(segments))
+    return console.render_lines(renderable, render_options, style=resolved_style, pad=False)
+
+
 class _ReflowSafeListItem(ListItem):
     """List item whose inner lines omit right-edge space padding."""
 
     def render_bullet(self, console: Console, options: ConsoleOptions) -> RenderResult:
         render_options = options.update(width=max(1, options.max_width - 3))
-        lines = console.render_lines(self.elements, render_options, style=self.style, pad=False)
+        lines = _render_container_lines(console, self.elements, render_options, style=self.style)
         bullet_style = console.get_style("markdown.item.bullet", default="none")
 
         bullet = Segment(" • ", bullet_style)
@@ -781,7 +822,7 @@ class _ReflowSafeListItem(ListItem):
     ) -> RenderResult:
         number_width = len(str(last_number)) + 2
         render_options = options.update(width=max(1, options.max_width - number_width))
-        lines = console.render_lines(self.elements, render_options, style=self.style, pad=False)
+        lines = _render_container_lines(console, self.elements, render_options, style=self.style)
         number_style = console.get_style("markdown.item.number", default="none")
 
         new_line = Segment("\n")
@@ -805,7 +846,7 @@ class _ReflowSafeBlockQuote(BlockQuote):
         options: ConsoleOptions,
     ) -> RenderResult:
         render_options = options.update(width=max(1, options.max_width - 4))
-        lines = console.render_lines(self.elements, render_options, style=self.style, pad=False)
+        lines = _render_container_lines(console, self.elements, render_options, style=self.style)
         style = self.style
         new_line = Segment("\n")
         padding = Segment("▌ ", style)
@@ -857,26 +898,32 @@ class _ReflowSafeMarkdown(Markdown):
     ) -> None:
         self._live_incomplete_fences = live_incomplete_fences
         self._cursor_suffix = cursor_suffix
-        self._cursor_fence_token: Token | None = None
+        self._open_fence_token: Token | None = None
         self._trailing_cursor = ""
         full_markup = f"{markup}\n\n{reference_definitions}" if reference_definitions else markup
         super().__init__(full_markup, code_theme=code_theme, style=style)
-        if not cursor_suffix:
-            return
 
         last_leaf = next(
             (token for token in reversed(self.parsed) if token.nesting == 0),
             None,
         )
+        if live_incomplete_fences and last_leaf is not None and _token_is_open_fence(last_leaf):
+            body_tokens = self.parsed
+            if reference_definitions:
+                markup_only = Markdown(markup, code_theme=code_theme, style=style)
+                body_tokens = markup_only.parsed
+            max_mapped_end = max(
+                (token.map[1] for token in body_tokens if token.map is not None),
+                default=0,
+            )
+            if max_mapped_end >= len(markup.splitlines()):
+                self._open_fence_token = last_leaf
+
+        if not cursor_suffix:
+            return
+
         if last_leaf is None or last_leaf.type in {"fence", "code_block", "hr"}:
-            if (
-                last_leaf is not None
-                and last_leaf.type == "fence"
-                and live_incomplete_fences
-                and _token_is_open_fence(last_leaf)
-            ):
-                self._cursor_fence_token = last_leaf
-            else:
+            if self._open_fence_token is None:
                 self._trailing_cursor = cursor_suffix
             return
 
@@ -995,7 +1042,7 @@ def _render_code_chunk(
             cursor_suffix=cursor_suffix,
         )
         if cursor_suffix
-        else Syntax(
+        else _ReflowSafeSyntax(
             text,
             normalized_language,
             theme=code_theme,
@@ -1011,7 +1058,7 @@ def _render_code_chunk(
 
     if pad_code_blocks and not cursor_suffix:
         render_text = f"\n{text}\n"
-        return Syntax(
+        return _ReflowSafeSyntax(
             render_text,
             normalized_language,
             theme=code_theme,

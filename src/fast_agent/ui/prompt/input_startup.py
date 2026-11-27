@@ -81,6 +81,8 @@ class ShellRuntimeStartupProvider(Protocol):
 class DurableProcessStartupRuntime(Protocol):
     async def discover_durable_processes(
         self,
+        *,
+        active_only: bool = False,
     ) -> tuple[DurableProcessStartupSnapshot, ...]: ...
 
     async def process_snapshots(self) -> tuple[ManagedProcessStartupSnapshot, ...]: ...
@@ -324,7 +326,7 @@ def show_input_help_banner(
         else "[dim]Use [/dim]/attach[dim], '[/dim]^file:[dim]', or '[/dim]^url:[dim]' for attachments.[/dim]"
     )
     rich_print(
-        """CTRL+T [dim]multiline, [/dim]CTRL+Y[dim] copy last message, [/dim]CTRL+E[dim] external editor.[/dim]\n"""
+        """CTRL+T [dim]multiline, [/dim]CTRL+Y[dim] copy last message, [/dim]CTRL+E[dim] external editor, [/dim]ALT+R[dim] reprint last turn.[/dim]\n"""
         """CTRL+C[dim] to interrupt generation or background waiting, [/dim]CTRL+D[dim] to exit.[/dim]\n"""
         """CTRL+Space[dim] or [/dim]Tab[dim] for path completion.[/dim]\n"""
         """F5[dim] to cycle subagents and harness tools.[/dim]\n"""
@@ -366,7 +368,7 @@ async def show_shell_startup(
 
     rich_print(format_shell_notice(shell_context.access_modes, shell_context.runtime))
     if isinstance(shell_context.runtime, DurableProcessStartupRuntime):
-        durable_processes = await shell_context.runtime.discover_durable_processes()
+        durable_processes = await shell_context.runtime.discover_durable_processes(active_only=True)
         runtimes: list[DurableProcessStartupRuntime] = [shell_context.runtime]
         if agent_provider is not None:
             for agent in agent_provider.registered_agents().values():
