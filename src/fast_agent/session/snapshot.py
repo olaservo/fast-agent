@@ -1359,10 +1359,6 @@ def _capture_event_subscriptions(
 
     snapshots: list[SessionEventSubscriptionSnapshot] = []
     for subscription in agent.list_active_event_subscriptions():
-        if subscription.status == "terminated":
-            continue
-        if subscription.status == "completed" and not subscription.once:
-            continue
         snapshots.append(
             SessionEventSubscriptionSnapshot(
                 server=subscription.server_name,

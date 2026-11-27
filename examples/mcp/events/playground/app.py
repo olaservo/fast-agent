@@ -135,8 +135,8 @@ MAX_HEARTBEAT_MS = 30_000
 
 @dataclass(frozen=True)
 class StoredEvent:
-    seq: int
     event_id: str
+    stream_seq: int
     name: str
     filter_key: str
     timestamp: datetime
@@ -148,7 +148,7 @@ class StoredEvent:
             name=self.name,
             timestamp=self.timestamp.isoformat(),
             data=self.data,
-            cursor=str(self.seq),
+            cursor=str(self.stream_seq),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -167,16 +167,14 @@ class PlaygroundState:
         default_factory=lambda: max(250, int(os.environ.get("POLL_INTERVAL_MS", "2000")))
     )
     streams: dict[tuple[str, str], list[StoredEvent]] = field(default_factory=dict)
+    stream_totals: dict[tuple[str, str], int] = field(default_factory=dict)
     pending_gaps: set[tuple[str, str]] = field(default_factory=set)
     forbidden_keys: set[tuple[str, str]] = field(default_factory=set)
     poll_log: list[dict[str, Any]] = field(default_factory=list)
     recent_events: list[dict[str, Any]] = field(default_factory=list)
-    # Cursors are event_seq values. Reset keeps counting so cursors never repeat.
     event_seq: int = 0
-    # Per stream, the seq of the newest event dropped by the history cap.
-    trimmed_through: dict[tuple[str, str], int] = field(default_factory=dict)
     open_streams: dict[int, dict[str, Any]] = field(default_factory=dict)
-    stream_seq: int = 0
+    push_stream_count: int = 0
     # Set and replaced on every change, so waiting push streams wake up.
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -185,20 +183,21 @@ class PlaygroundState:
         self.changed = asyncio.Event()
 
     def emit(self, event_name: str, filter_key: str, data: dict[str, Any]) -> StoredEvent:
+        key = (event_name, filter_key)
         self.event_seq += 1
+        stream_seq = self.stream_totals.get(key, 0) + 1
+        self.stream_totals[key] = stream_seq
         record = StoredEvent(
-            seq=self.event_seq,
             event_id=f"ev-{self.event_seq}",
+            stream_seq=stream_seq,
             name=event_name,
             filter_key=filter_key,
             timestamp=datetime.now(UTC),
             data=data,
         )
-        key = (event_name, filter_key)
         bucket = self.streams.setdefault(key, [])
         bucket.append(record)
         if len(bucket) > MAX_STREAM_HISTORY:
-            self.trimmed_through[key] = bucket[-MAX_STREAM_HISTORY - 1].seq
             del bucket[:-MAX_STREAM_HISTORY]
 
         self.recent_events.append(record.to_dict())
@@ -208,8 +207,9 @@ class PlaygroundState:
         return record
 
     def reset(self) -> None:
+        # Keep stream_totals and event_seq monotonic so connected clients see
+        # truncated=True and fresh event IDs instead of silently skipping events.
         self.streams.clear()
-        self.trimmed_through.clear()
         self.pending_gaps.clear()
         self.forbidden_keys.clear()
         self.poll_log.clear()
@@ -229,30 +229,6 @@ def _resolve_stream_key(name: str, arguments: dict[str, Any]) -> tuple[str, str]
     if name == "system.heartbeat":
         return ("system.heartbeat", "*")
     raise MCPError(EVENTS_NOT_FOUND, "NotFound", {"kind": "event"})
-
-
-def _read_after(
-    key: tuple[str, str], cursor: str | None, max_age_ms: int | None
-) -> tuple[list[StoredEvent], int, bool]:
-    """Return the events after ``cursor``, the position read from, and whether events were lost."""
-    if cursor is None:
-        return [], state.event_seq, False
-    try:
-        position = int(cursor)
-    except ValueError as exc:
-        raise MCPError(INVALID_PARAMS, f"Invalid cursor: {cursor!r}") from exc
-    if position > state.event_seq:
-        # A cursor from before a server restart.
-        return [], state.event_seq, True
-
-    truncated = state.trimmed_through.get(key, 0) > position
-    events = [ev for ev in state.streams.get(key, []) if ev.seq > position]
-    if max_age_ms is not None and max_age_ms >= 0:
-        cutoff = datetime.now(UTC) - timedelta(milliseconds=max_age_ms)
-        recent = [ev for ev in events if ev.timestamp >= cutoff]
-        truncated = truncated or len(recent) < len(events)
-        events = recent
-    return events, position, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -316,21 +292,49 @@ async def poll_events(ctx: Any, params: PollEventsRequestParams) -> PollEventsRe
     if key in state.forbidden_keys:
         raise MCPError(EVENTS_FORBIDDEN, "Subscription revoked by server")
 
-    sliced, _, truncated = _read_after(key, params.cursor, params.max_age_ms)
+    history = state.streams.get(key, [])
+    total = state.stream_totals.get(key, 0)
+    # Sequence number of the last evicted event (0 when nothing has been trimmed).
+    evicted_through = total - len(history)
+    truncated = False
+
+    if params.cursor is None:
+        start = len(history)
+    else:
+        try:
+            cursor_seq = int(params.cursor)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, f"Invalid cursor: {params.cursor!r}") from exc
+        if cursor_seq < 0:
+            raise MCPError(INVALID_PARAMS, f"Invalid cursor: {params.cursor!r}")
+        if cursor_seq < evicted_through or cursor_seq > total:
+            truncated = True
+            start = 0
+        else:
+            start = cursor_seq - evicted_through
+
     if key in state.pending_gaps and params.cursor is not None:
         state.pending_gaps.discard(key)
         truncated = True
 
+    sliced = history[start:]
+    if params.max_age_ms is not None and params.max_age_ms >= 0:
+        cutoff = datetime.now(UTC) - timedelta(milliseconds=params.max_age_ms)
+        filtered = [ev for ev in sliced if ev.timestamp >= cutoff]
+        if len(filtered) < len(sliced):
+            truncated = True
+        sliced = filtered
+
     has_more = False
-    next_cursor = state.event_seq
+    next_cursor_seq = total
     if params.max_events is not None and params.max_events > 0 and len(sliced) > params.max_events:
         sliced = sliced[: params.max_events]
         has_more = True
-        next_cursor = sliced[-1].seq
+        next_cursor_seq = sliced[-1].stream_seq
 
     result = PollEventsResult(
         events=[ev.to_occurrence() for ev in sliced],
-        cursor=str(next_cursor),
+        cursor=str(next_cursor_seq),
         truncated=truncated,
         has_more=has_more,
         next_poll_ms=state.poll_interval_ms,
@@ -354,6 +358,16 @@ async def poll_events(ctx: Any, params: PollEventsRequestParams) -> PollEventsRe
     return result
 
 
+def _events_after(key: tuple[str, str], position: int) -> tuple[list[StoredEvent], int, bool]:
+    """Return the events after ``position``, the position they follow, and whether any were lost."""
+    history = state.streams.get(key, [])
+    total = state.stream_totals.get(key, 0)
+    evicted_through = total - len(history)
+    if position < evicted_through or position > total:
+        return list(history), evicted_through, True
+    return [ev for ev in history if ev.stream_seq > position], position, False
+
+
 async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEventsResult:
     key = _resolve_stream_key(params.name, params.arguments)
     if key in state.forbidden_keys:
@@ -369,11 +383,26 @@ async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEv
         )
         await ctx.session.send_notification(notification, related_request_id=ctx.request_id)
 
-    state.stream_seq += 1
-    stream_id = state.stream_seq
     # Take the wake-up event before reading, so an emit during a send is not missed.
     changed = state.changed
-    events, position, truncated = _read_after(key, params.cursor, params.max_age_ms)
+    if params.cursor is None:
+        events, position, truncated = [], state.stream_totals.get(key, 0), False
+    else:
+        try:
+            cursor_seq = int(params.cursor)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, f"Invalid cursor: {params.cursor!r}") from exc
+        if cursor_seq < 0:
+            raise MCPError(INVALID_PARAMS, f"Invalid cursor: {params.cursor!r}")
+        events, position, truncated = _events_after(key, cursor_seq)
+    if params.max_age_ms is not None and params.max_age_ms >= 0:
+        cutoff = datetime.now(UTC) - timedelta(milliseconds=params.max_age_ms)
+        recent = [ev for ev in events if ev.timestamp >= cutoff]
+        truncated = truncated or len(recent) < len(events)
+        events = recent
+
+    state.push_stream_count += 1
+    stream_id = state.push_stream_count
     info = {
         "stream": stream_id,
         "name": params.name,
@@ -392,7 +421,7 @@ async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEv
         while True:
             for ev in events:
                 await send("event", ev.to_occurrence())
-                position = ev.seq
+                position = ev.stream_seq
                 info["delivered"] += 1
             info["cursor"] = str(position)
 
@@ -407,7 +436,7 @@ async def stream_events(ctx: Any, params: StreamEventsRequestParams) -> StreamEv
                 await send("terminated", EventStreamTerminated(error=error))
                 return StreamEventsResult()
             changed = state.changed
-            events, position, truncated = _read_after(key, str(position), None)
+            events, position, truncated = _events_after(key, position)
             if key in state.pending_gaps:
                 state.pending_gaps.discard(key)
                 truncated = True
